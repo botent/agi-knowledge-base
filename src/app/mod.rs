@@ -69,6 +69,7 @@ pub struct App {
     pub(crate) pending_oauth: Option<(String, PendingOAuth)>,
     pub(crate) scroll_offset: u16,
     pub(crate) should_quit: bool,
+    pub(crate) show_side_panel: bool,
     // Input history (up/down arrow cycling)
     pub(crate) input_history: Vec<String>,
     pub(crate) history_index: Option<usize>,
@@ -116,6 +117,7 @@ impl App {
             pending_oauth: None,
             scroll_offset: 0,
             should_quit: false,
+            show_side_panel: false,
             input_history: Vec::new(),
             history_index: None,
             history_stash: String::new(),
@@ -266,6 +268,10 @@ impl App {
                 modifiers: KeyModifiers::CONTROL,
                 ..
             } => self.logs.clear(),
+
+            KeyEvent {
+                code: KeyCode::Tab, ..
+            } => self.show_side_panel = !self.show_side_panel,
 
             KeyEvent { code, .. } => match code {
                 KeyCode::Char(ch) => {

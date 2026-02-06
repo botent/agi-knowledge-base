@@ -41,7 +41,20 @@ impl App {
             "/thread" => self.handle_thread_command(parts.collect()),
             "/memory" | "/mem" => self.handle_memory_command(parts.collect()),
             "/daemon" | "/d" | "/auto" => self.handle_daemon_command(parts.collect()),
+            "/spawn" => self.handle_spawn_command(parts.collect()),
             "/share" => self.handle_share_command(parts.collect()),
+            "/panel" => {
+                self.show_side_panel = !self.show_side_panel;
+                let state = if self.show_side_panel {
+                    "shown"
+                } else {
+                    "hidden"
+                };
+                self.log(
+                    LogLevel::Info,
+                    format!("Side panel {state}. (You can also press Tab to toggle.)"),
+                );
+            }
             _ => log_src!(self, LogLevel::Warn, format!("Unknown command: {cmd}")),
         }
 
@@ -79,6 +92,11 @@ impl App {
             "  /auto add <n> <s> <p>   Create a custom task (name, seconds, prompt)",
             "  /auto remove <name>     Remove a task",
             "  /auto results [name]    See recent task outputs",
+            "",
+            "Agents (Multi-Instance)",
+            "  /spawn <prompt>         Spin up a one-shot agent with your prompt",
+            "  /spawn list             Show all spawned agent runs",
+            "  /panel                  Toggle the side panel (or press Tab)",
             "",
             "Integrations",
             "  /mcp                    List available tools (MCP servers)",
@@ -1535,6 +1553,90 @@ impl App {
         );
         for (ts, name, msg) in results.iter().rev().take(10) {
             self.log(LogLevel::Info, format!("  [{ts}] {name} -- {msg}"));
+        }
+    }
+}
+
+// ── Spawn commands (multi-instance agents) ───────────────────────────
+
+impl App {
+    pub(crate) fn handle_spawn_command(&mut self, args: Vec<&str>) {
+        if args.is_empty() {
+            self.log(
+                LogLevel::Info,
+                "Usage: /spawn <prompt>  or  /spawn list".to_string(),
+            );
+            self.log(
+                LogLevel::Info,
+                "Spin up a one-shot agent instance. It runs in the background, commits results to Rice, and shows up in the side panel.".to_string(),
+            );
+            return;
+        }
+
+        if args[0] == "list" {
+            self.list_spawned_agents();
+            return;
+        }
+
+        // Everything after /spawn is the prompt.
+        let prompt = args.join(" ");
+        self.spawn_agent_instance(&prompt);
+    }
+
+    fn spawn_agent_instance(&mut self, prompt: &str) {
+        // Generate a short instance name.
+        let idx = self.daemon_results.len() + self.daemon_handles.len() + 1;
+        let name = format!("agent-{idx}");
+
+        let def = super::daemon::DaemonTaskDef {
+            name: name.clone(),
+            persona: format!(
+                "{} You are running as a spawned agent instance. \
+                 Complete the task and return a clear, actionable result.",
+                self.active_agent.persona
+            ),
+            prompt: prompt.to_string(),
+            interval_secs: 0, // one-shot, no interval
+            paused: false,
+        };
+
+        self.run_daemon_oneshot(def);
+        self.log(
+            LogLevel::Info,
+            format!(
+                "Spawned '{name}' -- working in background. Results appear in the side panel (Tab)."
+            ),
+        );
+
+        // Auto-show the side panel so user sees the result arrive.
+        if !self.show_side_panel {
+            self.show_side_panel = true;
+        }
+    }
+
+    fn list_spawned_agents(&mut self) {
+        let spawned: Vec<_> = self
+            .daemon_results
+            .iter()
+            .filter(|r| r.task_name.starts_with("agent-"))
+            .map(|r| (r.timestamp.clone(), r.task_name.clone(), r.message.clone()))
+            .collect();
+
+        if spawned.is_empty() {
+            self.log(
+                LogLevel::Info,
+                "No spawned agent results yet. Use /spawn <prompt> to run one.".to_string(),
+            );
+            return;
+        }
+
+        self.log(
+            LogLevel::Info,
+            format!("Spawned agent results ({}):", spawned.len()),
+        );
+        for (ts, name, msg) in spawned.iter().rev().take(10) {
+            let preview: String = msg.lines().next().unwrap_or("").chars().take(80).collect();
+            self.log(LogLevel::Info, format!("  [{ts}] {name} -- {preview}"));
         }
     }
 }
