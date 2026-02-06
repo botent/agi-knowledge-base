@@ -68,6 +68,7 @@ pub struct AgentWindow {
     /// If the agent asked for input, what it asked.
     pub pending_question: Option<String>,
     /// Scroll offset within this window (for long output).
+    #[allow(dead_code)]
     pub scroll: u16,
 }
 

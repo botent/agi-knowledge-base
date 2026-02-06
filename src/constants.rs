@@ -37,6 +37,7 @@ pub const MAX_THREAD_MESSAGES: usize = 30;
 // ── Daemon / autonomous agent constants ──────────────────────────────
 
 /// Rice variable key for the persisted daemon schedule.
+#[allow(dead_code)]
 pub const DAEMON_SCHEDULE_VAR: &str = "memini_daemon_schedule";
 /// Default interval (in seconds) for periodic agents.
 pub const DEFAULT_AGENT_INTERVAL_SECS: u64 = 1800; // 30 minutes

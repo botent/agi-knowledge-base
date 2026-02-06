@@ -333,12 +333,15 @@ impl App {
 
         self.log(
             LogLevel::Info,
-            format!("Spawned {label} -- use Ctrl+{window_id} to focus, Tab to show panel."),
+            format!("Spawned {label} — opening session."),
         );
 
-        // Auto-show & focus.
-        self.show_side_panel = true;
+        // Auto-navigate into the agent session.
         self.focused_window = Some(window_id);
+        self.view_mode = super::super::ViewMode::AgentSession(window_id);
+        // Also select this cell in the grid for when we come back.
+        let idx = self.agent_windows.len().saturating_sub(1);
+        self.grid_selected = idx;
     }
 
     fn list_spawned_agents(&mut self) {

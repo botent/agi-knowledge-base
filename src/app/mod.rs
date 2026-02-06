@@ -41,6 +41,17 @@ use self::daemon::{AgentEvent, AgentWindow, AgentWindowStatus, DaemonHandle};
 use self::logging::{LogContent, LogLevel, LogLine};
 use self::store::{LocalMcpStore, load_local_mcp_store};
 
+// ── View modes ───────────────────────────────────────────────────────
+
+/// Which top-level screen the TUI is showing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ViewMode {
+    /// Home dashboard — status bar + 3×3 agent grid.
+    Dashboard,
+    /// Full-screen session for a single agent window (by id).
+    AgentSession(usize),
+}
+
 // ── Application state ────────────────────────────────────────────────
 
 /// Top-level application state.
@@ -83,6 +94,9 @@ pub struct App {
     pub(crate) agent_windows: Vec<AgentWindow>,
     pub(crate) next_window_id: usize,
     pub(crate) focused_window: Option<usize>, // id of the focused window
+    // Dashboard grid navigation
+    pub(crate) view_mode: ViewMode,
+    pub(crate) grid_selected: usize, // index into grid cells (0..8 for 3×3)
 }
 
 // ── Lifecycle ────────────────────────────────────────────────────────
@@ -132,6 +146,8 @@ impl App {
             agent_windows: Vec::new(),
             next_window_id: 1,
             focused_window: None,
+            view_mode: ViewMode::Dashboard,
+            grid_selected: 0,
         };
 
         app.log(
@@ -276,60 +292,154 @@ impl App {
                 ..
             } => self.logs.clear(),
 
-            KeyEvent {
-                code: KeyCode::Tab, ..
-            } => self.show_side_panel = !self.show_side_panel,
-
-            // Ctrl+1 through Ctrl+9: focus agent window.
+            // Ctrl+1 through Ctrl+9: jump straight into an agent session.
             KeyEvent {
                 code: KeyCode::Char(ch @ '1'..='9'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
             } => {
-                let idx = (ch as usize) - ('0' as usize);
-                self.focus_agent_window(idx);
+                let idx = (ch as usize) - ('1' as usize); // 0-based index
+                if let Some(window) = self.agent_windows.get(idx) {
+                    let wid = window.id;
+                    self.view_mode = ViewMode::AgentSession(wid);
+                    self.focused_window = Some(wid);
+                }
             }
 
-            // Ctrl+0: unfocus (back to main chat).
-            KeyEvent {
-                code: KeyCode::Char('0'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                self.focused_window = None;
-            }
-
-            KeyEvent { code, .. } => match code {
-                KeyCode::Char(ch) => {
-                    self.scroll_offset = 0; // snap to bottom on new input
-                    self.history_index = None; // reset history browse
-                    self.insert_char(ch);
-                }
-                KeyCode::Backspace => self.backspace(),
-                KeyCode::Delete => self.delete(),
-                KeyCode::Left => self.move_cursor_left(),
-                KeyCode::Right => self.move_cursor_right(),
-                KeyCode::Home => self.move_cursor_home(),
-                KeyCode::End => self.move_cursor_end(),
-                KeyCode::Up => self.history_prev(),
-                KeyCode::Down => self.history_next(),
-                KeyCode::PageUp => self.scroll_up(10),
-                KeyCode::PageDown => self.scroll_down(10),
-                KeyCode::Enter => {
-                    self.scroll_offset = 0; // snap to bottom on submit
-                    self.submit_input()?;
-                }
-                KeyCode::Esc => {
-                    if !self.input.is_empty() {
-                        self.input.clear();
-                        self.cursor = 0;
-                        self.history_index = None;
-                    } else {
-                        self.should_quit = true;
+            KeyEvent { code, .. } => {
+                // View-mode aware dispatch for arrow keys, Enter, Esc.
+                match &self.view_mode {
+                    ViewMode::Dashboard => self.handle_dashboard_key(code)?,
+                    ViewMode::AgentSession(wid) => {
+                        let wid = *wid;
+                        self.handle_session_key(code, wid)?;
                     }
                 }
-                _ => {}
-            },
+            }
+        }
+        Ok(())
+    }
+
+    /// Key handling while on the dashboard (grid navigation + input).
+    fn handle_dashboard_key(&mut self, code: KeyCode) -> Result<()> {
+        // If the input box is non-empty, typed characters go to input first.
+        match code {
+            // ── Grid navigation (only when input is empty) ───────────
+            KeyCode::Left if self.input.is_empty() => {
+                if self.grid_selected % 3 > 0 {
+                    self.grid_selected -= 1;
+                }
+            }
+            KeyCode::Right if self.input.is_empty() => {
+                if self.grid_selected % 3 < 2 {
+                    self.grid_selected += 1;
+                }
+            }
+            KeyCode::Up if self.input.is_empty() => {
+                if self.grid_selected >= 3 {
+                    self.grid_selected -= 3;
+                }
+            }
+            KeyCode::Down if self.input.is_empty() => {
+                if self.grid_selected + 3 < 9 {
+                    self.grid_selected += 3;
+                }
+            }
+
+            // Enter with empty input and a selected agent → open that session.
+            KeyCode::Enter if self.input.is_empty() => {
+                if let Some(window) = self.agent_windows.get(self.grid_selected) {
+                    let wid = window.id;
+                    self.view_mode = ViewMode::AgentSession(wid);
+                    self.focused_window = Some(wid);
+                }
+                // If no agent in that cell, Enter with empty input is a no-op.
+            }
+
+            // Enter with text → submit input as usual (command / chat).
+            KeyCode::Enter => {
+                self.scroll_offset = 0;
+                self.submit_input()?;
+            }
+
+            KeyCode::Esc => {
+                if !self.input.is_empty() {
+                    self.input.clear();
+                    self.cursor = 0;
+                    self.history_index = None;
+                } else {
+                    self.should_quit = true;
+                }
+            }
+
+            // ── Text input ───────────────────────────────────────────
+            KeyCode::Char(ch) => {
+                self.scroll_offset = 0;
+                self.history_index = None;
+                self.insert_char(ch);
+            }
+            KeyCode::Backspace => self.backspace(),
+            KeyCode::Delete => self.delete(),
+            KeyCode::Left => self.move_cursor_left(),
+            KeyCode::Right => self.move_cursor_right(),
+            KeyCode::Home => self.move_cursor_home(),
+            KeyCode::End => self.move_cursor_end(),
+            KeyCode::Up => self.history_prev(),
+            KeyCode::Down => self.history_next(),
+            KeyCode::PageUp => self.scroll_up(10),
+            KeyCode::PageDown => self.scroll_down(10),
+            KeyCode::Tab => {
+                // Tab on dashboard could cycle grid selection forward.
+                self.grid_selected = (self.grid_selected + 1) % 9;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Key handling while in an agent session (full-screen agent view).
+    fn handle_session_key(&mut self, code: KeyCode, window_id: usize) -> Result<()> {
+        match code {
+            // Esc returns to dashboard.
+            KeyCode::Esc => {
+                if !self.input.is_empty() {
+                    self.input.clear();
+                    self.cursor = 0;
+                    self.history_index = None;
+                } else {
+                    self.view_mode = ViewMode::Dashboard;
+                    self.focused_window = None;
+                    // Keep grid_selected pointing at this agent.
+                    if let Some(idx) = self.agent_windows.iter().position(|w| w.id == window_id) {
+                        self.grid_selected = idx;
+                    }
+                }
+            }
+
+            KeyCode::Enter => {
+                self.scroll_offset = 0;
+                // In agent session, set focused_window so submit_input can reply.
+                self.focused_window = Some(window_id);
+                self.submit_input()?;
+            }
+
+            // Standard text editing.
+            KeyCode::Char(ch) => {
+                self.scroll_offset = 0;
+                self.history_index = None;
+                self.insert_char(ch);
+            }
+            KeyCode::Backspace => self.backspace(),
+            KeyCode::Delete => self.delete(),
+            KeyCode::Left => self.move_cursor_left(),
+            KeyCode::Right => self.move_cursor_right(),
+            KeyCode::Home => self.move_cursor_home(),
+            KeyCode::End => self.move_cursor_end(),
+            KeyCode::Up => self.history_prev(),
+            KeyCode::Down => self.history_next(),
+            KeyCode::PageUp => self.scroll_up(10),
+            KeyCode::PageDown => self.scroll_down(10),
+            _ => {}
         }
         Ok(())
     }
@@ -501,11 +611,9 @@ impl App {
                         win.output_lines
                             .push(format!(">> Waiting for your input: {question}"));
                     }
-                    // Auto-focus the window that needs input.
+                    // Auto-navigate into the agent session that needs input.
                     self.focused_window = Some(window_id);
-                    if !self.show_side_panel {
-                        self.show_side_panel = true;
-                    }
+                    self.view_mode = ViewMode::AgentSession(window_id);
                 }
                 AgentEvent::DaemonResult {
                     task_name,
@@ -523,13 +631,12 @@ impl App {
         }
     }
 
-    /// Focus an agent window by its 1-based id.
+    /// Focus an agent window by its id — opens the session view.
+    #[allow(dead_code)]
     pub(crate) fn focus_agent_window(&mut self, id: usize) {
         if self.agent_windows.iter().any(|w| w.id == id) {
             self.focused_window = Some(id);
-            if !self.show_side_panel {
-                self.show_side_panel = true;
-            }
+            self.view_mode = ViewMode::AgentSession(id);
         }
     }
 
@@ -552,7 +659,7 @@ impl App {
             win.pending_question = None;
         }
 
-        let persona = self
+        let _persona = self
             .agent_windows
             .iter()
             .find(|w| w.id == window_id)
