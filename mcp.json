@@ -2,12 +2,9 @@
   "servers": [
     {
       "id": "granola",
-      "name": "Granola",
       "url": "https://mcp.granola.ai/mcp",
       "auth": {
-        "type": "oauth_browser",
-        "login_url": "https://granola.ai/login",
-        "notes": "Authenticate via browser OAuth flow. After auth, return and use /mcp status."
+        "type": "oauth_browser"
       }
     }
   ]

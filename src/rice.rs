@@ -1,0 +1,259 @@
+use std::env;
+
+use anyhow::{anyhow, Context, Result};
+use rice_sdk::rice_core::config::{StateConfig, StorageConfig};
+use rice_sdk::rice_state::proto::Trace;
+use rice_sdk::{Client, RiceConfig};
+use serde_json::Value;
+
+use crate::constants::{APP_NAME, DEFAULT_RUN_ID};
+use crate::util::{env_first, normalize_url};
+
+pub struct RiceStore {
+    client: Option<Client>,
+    pub status: RiceStatus,
+    run_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub enum RiceStatus {
+    Connected,
+    Disabled(String),
+}
+
+impl RiceStore {
+    pub async fn connect() -> Self {
+        let Some(config) = rice_config_from_env() else {
+            return RiceStore {
+                client: None,
+                status: RiceStatus::Disabled("Rice env not configured".to_string()),
+                run_id: rice_run_id(),
+            };
+        };
+
+        match Client::new(config).await {
+            Ok(client) => {
+                let status = if client.state.is_some() {
+                    RiceStatus::Connected
+                } else {
+                    RiceStatus::Disabled("Rice state module not enabled".to_string())
+                };
+                RiceStore {
+                    client: Some(client),
+                    status,
+                    run_id: rice_run_id(),
+                }
+            }
+            Err(err) => RiceStore {
+                client: None,
+                status: RiceStatus::Disabled(format!("Client init failed: {err}")),
+                run_id: rice_run_id(),
+            },
+        }
+    }
+
+    pub fn status_label(&self) -> String {
+        match &self.status {
+            RiceStatus::Connected => "connected".to_string(),
+            RiceStatus::Disabled(reason) => format!("disabled ({reason})"),
+        }
+    }
+
+    pub async fn set_variable(&mut self, name: &str, value: Value, source: &str) -> Result<()> {
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| anyhow!("Rice not connected"))?;
+        let state = client
+            .state
+            .as_mut()
+            .ok_or_else(|| anyhow!("Rice state module not enabled"))?;
+        let value_json = serde_json::to_string(&value).context("serialize value")?;
+        state
+            .set_variable(
+                self.run_id.clone(),
+                name.to_string(),
+                value_json,
+                source.to_string(),
+            )
+            .await
+            .context("set variable")?;
+        Ok(())
+    }
+
+    pub async fn get_variable(&mut self, name: &str) -> Result<Option<Value>> {
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| anyhow!("Rice not connected"))?;
+        let state = client
+            .state
+            .as_mut()
+            .ok_or_else(|| anyhow!("Rice state module not enabled"))?;
+        let variable = state
+            .get_variable(self.run_id.clone(), name.to_string())
+            .await
+            .context("get variable")?;
+        if variable.value_json.trim().is_empty() {
+            return Ok(None);
+        }
+        let value =
+            serde_json::from_str::<Value>(&variable.value_json).context("parse value_json")?;
+        Ok(Some(value))
+    }
+
+    pub async fn delete_variable(&mut self, name: &str) -> Result<()> {
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| anyhow!("Rice not connected"))?;
+        let state = client
+            .state
+            .as_mut()
+            .ok_or_else(|| anyhow!("Rice state module not enabled"))?;
+        state
+            .delete_variable(self.run_id.clone(), name.to_string())
+            .await
+            .context("delete variable")?;
+        Ok(())
+    }
+
+    pub async fn focus(&mut self, content: &str) -> Result<()> {
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| anyhow!("Rice not connected"))?;
+        let state = client
+            .state
+            .as_mut()
+            .ok_or_else(|| anyhow!("Rice state module not enabled"))?;
+        state
+            .focus(content.to_string(), self.run_id.clone())
+            .await
+            .context("focus")?;
+        Ok(())
+    }
+
+    pub async fn reminisce(
+        &mut self,
+        embedding: Vec<f32>,
+        limit: u64,
+        query_text: &str,
+    ) -> Result<Vec<Trace>> {
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| anyhow!("Rice not connected"))?;
+        let state = client
+            .state
+            .as_mut()
+            .ok_or_else(|| anyhow!("Rice state module not enabled"))?;
+        let response = state
+            .reminisce(embedding, limit, query_text.to_string(), self.run_id.clone())
+            .await
+            .context("reminisce")?;
+        Ok(response.traces)
+    }
+
+    pub async fn commit_trace(
+        &mut self,
+        input: &str,
+        outcome: &str,
+        action: &str,
+        embedding: Vec<f32>,
+        agent_id: &str,
+    ) -> Result<()> {
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| anyhow!("Rice not connected"))?;
+        let state = client
+            .state
+            .as_mut()
+            .ok_or_else(|| anyhow!("Rice state module not enabled"))?;
+        let trace = Trace {
+            input: input.to_string(),
+            reasoning: String::new(),
+            action: action.to_string(),
+            outcome: outcome.to_string(),
+            agent_id: agent_id.to_string(),
+            embedding,
+            run_id: self.run_id.clone(),
+        };
+        state.commit(trace).await.context("commit trace")?;
+        Ok(())
+    }
+}
+
+fn rice_run_id() -> String {
+    env::var("MEMINI_RUN_ID").unwrap_or_else(|_| DEFAULT_RUN_ID.to_string())
+}
+
+fn rice_config_from_env() -> Option<RiceConfig> {
+    let mut config = RiceConfig::default();
+    let mut enabled = false;
+
+    if let Some(state_url) = env_first(&["RICE_STATE_URL", "STATE_INSTANCE_URL"]) {
+        enabled = true;
+        config.state = Some(StateConfig {
+            enabled: true,
+            base_url: Some(normalize_url(&state_url)),
+            auth_token: env_first(&["RICE_STATE_TOKEN", "STATE_AUTH_TOKEN"]),
+            llm_mode: None,
+            flux: None,
+        });
+    }
+
+    if let Some(storage_url) = env_first(&["RICE_STORAGE_URL", "STORAGE_INSTANCE_URL"]) {
+        enabled = true;
+        config.storage = Some(StorageConfig {
+            enabled: true,
+            base_url: Some(normalize_url(&storage_url)),
+            auth_token: env_first(&["RICE_STORAGE_TOKEN", "STORAGE_AUTH_TOKEN"]),
+            username: None,
+            password: None,
+        });
+    }
+
+    if enabled {
+        Some(config)
+    } else {
+        None
+    }
+}
+
+pub fn format_memories(traces: &[Trace]) -> String {
+    if traces.is_empty() {
+        return String::new();
+    }
+    let mut lines = Vec::new();
+    lines.push("Relevant memory from Rice:".to_string());
+    for trace in traces {
+        let input = trace.input.trim();
+        let outcome = trace.outcome.trim();
+        if input.is_empty() && outcome.is_empty() {
+            continue;
+        }
+        let action = trace.action.trim();
+        if action.is_empty() {
+            lines.push(format!("- input: {input} | outcome: {outcome}"));
+        } else {
+            lines.push(format!(
+                "- input: {input} | action: {action} | outcome: {outcome}"
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+pub fn system_prompt(require_mcp: bool) -> String {
+    if require_mcp {
+        "You are Memini, a concise CLI assistant. Use available tools when needed to answer the user's request. Summarize results clearly.".to_string()
+    } else {
+        "You are Memini, a concise CLI assistant. Use any provided memory context when helpful and answer clearly.".to_string()
+    }
+}
+
+pub fn agent_id() -> &'static str {
+    APP_NAME
+}
