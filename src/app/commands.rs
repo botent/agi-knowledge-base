@@ -40,7 +40,7 @@ impl App {
             "/agent" => self.handle_agent_command(parts.collect()),
             "/thread" => self.handle_thread_command(parts.collect()),
             "/memory" | "/mem" => self.handle_memory_command(parts.collect()),
-            "/daemon" | "/d" => self.handle_daemon_command(parts.collect()),
+            "/daemon" | "/d" | "/auto" => self.handle_daemon_command(parts.collect()),
             _ => log_src!(self, LogLevel::Warn, format!("Unknown command: {cmd}")),
         }
 
@@ -53,38 +53,46 @@ impl App {
 impl App {
     fn show_help(&mut self) {
         let lines = [
-            "Commands:",
-            "(no slash)              Chat with AI (multi-turn, persisted)",
-            "/agent                  List agents",
-            "/agent use <name>       Switch to agent",
-            "/agent create <n> <d>   Create custom agent",
-            "/agent delete <name>    Delete custom agent",
-            "/agent info             Show current agent details",
-            "/thread                 Show conversation info",
-            "/thread clear           Clear conversation thread",
-            "/memory <query>         Search Rice memories",
-            "/daemon                 List background daemon tasks",
-            "/daemon run <name>      Run a daemon task now",
-            "/daemon start <name>    Start a periodic daemon",
-            "/daemon stop <name>     Stop a running daemon",
-            "/daemon add <n> <s> <p> Add custom daemon (name, secs, prompt)",
-            "/daemon remove <name>   Remove a daemon task",
-            "/daemon results [name]  Show recent daemon results",
-            "/mcp                    List MCP servers",
-            "/mcp connect <id>       Set active MCP",
-            "/mcp ask <prompt>       Chat using MCP tools",
-            "/mcp auth <id>          Run OAuth flow",
-            "/mcp tools              List tools on active MCP",
-            "/mcp call <tool> <json> Call MCP tool with JSON args",
-            "/mcp disconnect         Close MCP connection",
-            "/mcp reload             Reload MCP config",
-            "/openai                 Show OpenAI key status",
-            "/openai set <key>       Persist OpenAI key in Rice",
-            "/key <key>              Set OpenAI key",
-            "/openai clear           Remove OpenAI key",
-            "/rice                   Show Rice connection status",
-            "/clear                  Clear activity log",
-            "/quit                   Exit",
+            "---  Memini -- your AI with a memory  ---",
+            "",
+            "Just type to chat -- Memini remembers everything via Rice.",
+            "",
+            "Chat & Memory",
+            "  (just type)             Talk to your AI -- it recalls past chats",
+            "  /memory <query>         Search your saved memories",
+            "  /thread                 Show current conversation info",
+            "  /thread clear           Start a fresh conversation",
+            "",
+            "Personas",
+            "  /agent                  See available personas",
+            "  /agent use <name>       Switch persona",
+            "  /agent create <n> <d>   Create a custom persona",
+            "  /agent delete <name>    Remove a custom persona",
+            "  /agent info             Current persona details",
+            "",
+            "Autopilot (Background Tasks)",
+            "  /auto                   See available background tasks",
+            "  /auto run <name>        Run a task right now",
+            "  /auto start <name>      Start a recurring task",
+            "  /auto stop <name>       Stop a running task",
+            "  /auto add <n> <s> <p>   Create a custom task (name, seconds, prompt)",
+            "  /auto remove <name>     Remove a task",
+            "  /auto results [name]    See recent task outputs",
+            "",
+            "Integrations",
+            "  /mcp                    List available tools (MCP servers)",
+            "  /mcp connect <id>       Connect to a tool",
+            "  /mcp ask <prompt>       Chat using connected tools",
+            "  /mcp tools              List tools on active connection",
+            "  /mcp disconnect         Disconnect current tool",
+            "",
+            "Settings",
+            "  /openai                 Show AI key status",
+            "  /openai set <key>       Save your OpenAI key (stored in Rice)",
+            "  /key <key>              Quick set OpenAI key",
+            "  /rice                   Show Rice memory connection status",
+            "  /clear                  Clear the screen",
+            "  /quit                   Exit Memini",
         ];
         for line in lines {
             self.log(LogLevel::Info, line.to_string());
@@ -987,34 +995,28 @@ impl App {
     }
 
     fn list_agents(&mut self) {
-        self.log(LogLevel::Info, "Available agents:".to_string());
+        self.log(LogLevel::Info, "Available personas:".to_string());
         let default = Agent::default();
         let marker = if self.active_agent.name == "memini" {
-            " \u{2B50}"
+            " (active)"
         } else {
             ""
         };
         self.log(
             LogLevel::Info,
-            format!(
-                "  \u{1F916} {} \u{2014} {}{marker}",
-                default.name, default.description
-            ),
+            format!("  {} -- {}{marker}", default.name, default.description),
         );
         let agents = self.custom_agents.clone();
         let active_name = self.active_agent.name.clone();
         for agent in &agents {
             let marker = if agent.name == active_name {
-                " \u{2B50}"
+                " (active)"
             } else {
                 ""
             };
             self.log(
                 LogLevel::Info,
-                format!(
-                    "  \u{1F916} {} \u{2014} {}{marker}",
-                    agent.name, agent.description
-                ),
+                format!("  {} -- {}{marker}", agent.name, agent.description),
             );
         }
     }
@@ -1058,7 +1060,7 @@ impl App {
         self.log(
             LogLevel::Info,
             format!(
-                "\u{1F916} Switched to agent: {} \u{2014} {}",
+                "Switched to persona: {} -- {}",
                 agent.name, agent.description
             ),
         );
@@ -1153,17 +1155,14 @@ impl App {
             );
         }
 
-        self.log(
-            LogLevel::Info,
-            format!("\u{1F5D1}\u{FE0F} Agent '{name}' deleted."),
-        );
+        self.log(LogLevel::Info, format!("Persona '{name}' deleted."));
     }
 
     fn show_agent_info(&mut self) {
         let name = self.active_agent.name.clone();
         let description = self.active_agent.description.clone();
         let thread_len = self.conversation_thread.len();
-        self.log(LogLevel::Info, format!("\u{1F916} Active agent: {name}"));
+        self.log(LogLevel::Info, format!("Active persona: {name}"));
         self.log(LogLevel::Info, format!("   Description: {description}"));
         self.log(LogLevel::Info, format!("   Thread: {thread_len} messages"));
     }
@@ -1189,7 +1188,7 @@ impl App {
         self.log(
             LogLevel::Info,
             format!(
-                "\u{1F4DD} Conversation: {count} messages ({turns} turns) | Agent: {}",
+                "Conversation: {count} messages ({turns} turns) | Persona: {}",
                 self.active_agent.name
             ),
         );
@@ -1210,10 +1209,7 @@ impl App {
                 format!("Thread clear failed: {err:#}")
             );
         }
-        self.log(
-            LogLevel::Info,
-            "\u{1F5D1}\u{FE0F} Conversation thread cleared.".to_string(),
-        );
+        self.log(LogLevel::Info, "Conversation cleared.".to_string());
     }
 }
 
@@ -1253,7 +1249,7 @@ impl App {
 
         self.log(
             LogLevel::Info,
-            format!("\u{1F9E0} Found {} memory(ies):", memories.len()),
+            format!("Found {} memory(ies):", memories.len()),
         );
         for trace in &memories {
             let input = trace.input.trim();
@@ -1371,7 +1367,7 @@ impl App {
             return;
         }
 
-        self.log(LogLevel::Info, "Background daemon tasks:".to_string());
+        self.log(LogLevel::Info, "Background tasks:".to_string());
 
         // Show built-in tasks (even if not running).
         for builtin in &builtins {
@@ -1379,15 +1375,11 @@ impl App {
                 .daemon_handles
                 .iter()
                 .any(|h| h.def.name == builtin.name);
-            let status = if running {
-                "🟢 running"
-            } else {
-                "⚪ available"
-            };
+            let status = if running { "running" } else { "available" };
             self.log(
                 LogLevel::Info,
                 format!(
-                    "  ⚡ {} — {} [{}s interval, {}]",
+                    "  {} -- {} [{}s interval, {}]",
                     builtin.name, builtin.prompt, builtin.interval_secs, status
                 ),
             );
@@ -1409,7 +1401,7 @@ impl App {
         for (name, prompt, interval) in &custom_daemons {
             self.log(
                 LogLevel::Info,
-                format!("  ⚡ {name} — {prompt} [{interval}s interval, 🟢 running]"),
+                format!("  {name} -- {prompt} [{interval}s interval, running]"),
             );
         }
     }
@@ -1421,7 +1413,7 @@ impl App {
                 handle.wake.notify_one();
                 self.log(
                     LogLevel::Info,
-                    format!("🚀 Woke daemon '{name}' for immediate run."),
+                    format!("Woke task '{name}' for immediate run."),
                 );
                 return;
             }
@@ -1462,7 +1454,7 @@ impl App {
         if let Some(pos) = self.daemon_handles.iter().position(|h| h.def.name == name) {
             let handle = self.daemon_handles.remove(pos);
             handle.abort.abort();
-            self.log(LogLevel::Info, format!("🛑 Daemon '{name}' stopped."));
+            self.log(LogLevel::Info, format!("Task '{name}' stopped."));
         } else {
             log_src!(
                 self,
@@ -1501,7 +1493,7 @@ impl App {
         self.spawn_daemon_task(def);
         self.log(
             LogLevel::Info,
-            format!("✨ Custom daemon '{name}' created and started (every {interval}s)."),
+            format!("Custom task '{name}' created and started (every {interval}s)."),
         );
     }
 
@@ -1512,7 +1504,7 @@ impl App {
             handle.abort.abort();
         }
 
-        self.log(LogLevel::Info, format!("🗑️ Daemon '{name}' removed."));
+        self.log(LogLevel::Info, format!("Task '{name}' removed."));
     }
 
     fn show_daemon_results(&mut self, filter: Option<&str>) {
@@ -1536,7 +1528,7 @@ impl App {
             format!("Recent daemon results ({}):", results.len()),
         );
         for (ts, name, msg) in results.iter().rev().take(10) {
-            self.log(LogLevel::Info, format!("  [{ts}] 🤖 {name} — {msg}"));
+            self.log(LogLevel::Info, format!("  [{ts}] {name} -- {msg}"));
         }
     }
 }

@@ -38,7 +38,7 @@ use crate::util::env_first;
 
 use self::agents::Agent;
 use self::daemon::{AgentEvent, DaemonHandle};
-use self::logging::{LogLevel, LogLine};
+use self::logging::{LogContent, LogLevel, LogLine};
 use self::store::{LocalMcpStore, load_local_mcp_store};
 
 // ── Application state ────────────────────────────────────────────────
@@ -121,14 +121,17 @@ impl App {
         app.log(
             LogLevel::Info,
             format!(
-                "Loaded {} MCP server(s) from {}.",
+                "Found {} tool integration(s).",
                 app.mcp_config.servers.len(),
-                app.mcp_source.label(),
             ),
         );
         app.log(
             LogLevel::Info,
-            "Type /help for commands. Just type to chat — I remember everything ✨".to_string(),
+            "Welcome to Memini.  Just type to chat -- I remember everything via Rice.".to_string(),
+        );
+        app.log(
+            LogLevel::Info,
+            "Type /help to see what I can do.".to_string(),
         );
 
         app.bootstrap();
@@ -174,7 +177,7 @@ impl App {
             Ok(Some(name)) if name != "memini" => {
                 if let Some(agent) = self.custom_agents.iter().find(|a| a.name == name) {
                     self.active_agent = agent.clone();
-                    self.log(LogLevel::Info, format!("\u{1F916} Agent: {}", agent.name));
+                    self.log(LogLevel::Info, format!("Persona: {}", agent.name));
                 }
             }
             Err(err) => {
@@ -194,7 +197,7 @@ impl App {
                 self.conversation_thread = thread;
                 self.log(
                     LogLevel::Info,
-                    format!("\u{1F4DD} Restored {turns} conversation turn(s) from Rice."),
+                    format!("Picked up where you left off ({turns} turn(s) from Rice)."),
                 );
             }
             Err(err) => {
@@ -324,13 +327,27 @@ macro_rules! log_src {
 pub(crate) use log_src;
 
 impl App {
-    /// Append a message to the activity log.
+    /// Append a plain-text message to the activity log.
     pub(crate) fn log(&mut self, level: LogLevel, message: String) {
         let timestamp = Local::now().format("%H:%M:%S").to_string();
         self.logs.push(LogLine {
             timestamp,
             level,
-            message,
+            content: LogContent::Plain(message),
+        });
+        if self.logs.len() > MAX_LOGS {
+            let overflow = self.logs.len() - MAX_LOGS;
+            self.logs.drain(0..overflow);
+        }
+    }
+
+    /// Append markdown content (LLM output) to the activity log.
+    pub(crate) fn log_markdown(&mut self, label: String, body: String) {
+        let timestamp = Local::now().format("%H:%M:%S").to_string();
+        self.logs.push(LogLine {
+            timestamp,
+            level: LogLevel::Info,
+            content: LogContent::Markdown { label, body },
         });
         if self.logs.len() > MAX_LOGS {
             let overflow = self.logs.len() - MAX_LOGS;
@@ -355,10 +372,8 @@ impl App {
     /// Drain pending background agent results and display them.
     pub(crate) fn drain_daemon_events(&mut self) {
         while let Ok(event) = self.daemon_rx.try_recv() {
-            self.log(
-                LogLevel::Info,
-                format!("🤖 [{}] {}", event.task_name, event.message),
-            );
+            let label = format!("{} (background)", event.task_name);
+            self.log_markdown(label, event.message.clone());
             self.daemon_results.push(event);
             if self.daemon_results.len() > MAX_DAEMON_RESULTS {
                 self.daemon_results.remove(0);
@@ -386,7 +401,7 @@ impl App {
         self.log(
             LogLevel::Info,
             format!(
-                "⚡ Daemon '{}' started (every {}s).",
+                "Task '{}' started (every {}s).",
                 handle.def.name, handle.def.interval_secs
             ),
         );
@@ -400,7 +415,7 @@ impl App {
         let key = self.openai_key.clone();
         let rice_handle = self.runtime.spawn(RiceStore::connect());
 
-        self.log(LogLevel::Info, format!("🚀 Running '{}' now...", def.name));
+        self.log(LogLevel::Info, format!("Running '{}' now...", def.name));
         daemon::spawn_oneshot(
             def,
             tx,

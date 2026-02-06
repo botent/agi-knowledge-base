@@ -26,12 +26,12 @@ impl App {
         let thread_turns = self.conversation_thread.len() / 2;
         let daemon_count = self.daemon_handles.len();
         let mut header_spans = vec![
-            Span::styled("Agent: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Persona: ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 self.active_agent.name.clone(),
                 Style::default().fg(Color::Magenta),
             ),
-            Span::styled("  MCP: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("  Tools: ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 self.mcp_status_label(),
                 Style::default().fg(self.mcp_status_color()),
@@ -42,13 +42,13 @@ impl App {
                 Style::default().fg(self.rice_status_color()),
             ),
             Span::styled(
-                format!("  Thread: {thread_turns}"),
+                format!("  Turns: {thread_turns}"),
                 Style::default().fg(Color::DarkGray),
             ),
         ];
         if daemon_count > 0 {
             header_spans.push(Span::styled(
-                format!("  ⚡{daemon_count}"),
+                format!("  Auto: {daemon_count}"),
                 Style::default().fg(Color::Yellow),
             ));
         }
@@ -61,9 +61,13 @@ impl App {
 
         // Build the log paragraph with wrapping so we can query its
         // rendered line count (ratatui 0.30 native API).
-        let log_lines: Vec<Line> = self.logs.iter().map(|l| l.render()).collect();
+        let log_lines: Vec<Line> = self
+            .logs
+            .iter()
+            .flat_map(|l| l.render())
+            .collect();
         let log_paragraph = Paragraph::new(Text::from(log_lines))
-            .wrap(Wrap { trim: true });
+            .wrap(Wrap { trim: false });
 
         let total_visual = log_paragraph.line_count(inner_width);
         let max_scroll = total_visual.saturating_sub(inner_height);
@@ -75,9 +79,9 @@ impl App {
         let top_row = max_scroll.saturating_sub(self.scroll_offset as usize) as u16;
 
         let scroll_indicator = if self.scroll_offset > 0 {
-            format!(" Activity [↑{}] ", self.scroll_offset)
+            format!(" Memini [↑{}] ", self.scroll_offset)
         } else {
-            " Activity ".to_string()
+            " Memini ".to_string()
         };
 
         let log_panel = log_paragraph

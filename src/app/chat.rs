@@ -61,10 +61,7 @@ impl App {
         if !memories.is_empty() {
             self.log(
                 LogLevel::Info,
-                format!(
-                    "\u{1F9E0} Recalled {} memory(ies) from Rice.",
-                    memories.len()
-                ),
+                format!("Rice recalled {} related memory(ies).", memories.len()),
             );
         }
 
@@ -130,10 +127,7 @@ impl App {
             tool_loops += 1;
 
             for call in tool_calls {
-                self.log(
-                    LogLevel::Info,
-                    format!("\u{26A1} Calling tool: {}", call.name),
-                );
+                self.log(LogLevel::Info, format!("Calling tool: {}", call.name));
                 let tool_output = match self.call_mcp_tool_value(&call.name, call.arguments) {
                     Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string()),
                     Err(err) => format!("{{\"error\":\"{err}\"}}"),
@@ -170,13 +164,10 @@ impl App {
 
         // Display result.
         if output_text.is_empty() {
-            log_src!(
-                self,
-                LogLevel::Warn,
-                "OpenAI returned no text output.".to_string()
-            );
+            log_src!(self, LogLevel::Warn, "No response received.".to_string());
         } else {
-            self.log(LogLevel::Info, format!("Assistant: {output_text}"));
+            let label = format!("{}", self.active_agent.name);
+            self.log_markdown(label, output_text.clone());
         }
 
         // Update conversation thread with this turn.

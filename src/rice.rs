@@ -61,7 +61,7 @@ impl RiceStore {
     pub fn status_label(&self) -> String {
         match &self.status {
             RiceStatus::Connected => "connected".to_string(),
-            RiceStatus::Disabled(reason) => format!("disabled ({reason})"),
+            RiceStatus::Disabled(reason) => format!("off ({reason})"),
         }
     }
 

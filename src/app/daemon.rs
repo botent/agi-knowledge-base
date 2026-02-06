@@ -129,7 +129,7 @@ pub fn spawn_task(
             let Some(key) = &openai_key else {
                 let _ = tx.send(AgentEvent {
                     task_name: def_clone.name.clone(),
-                    message: "⚠️ No OpenAI key — skipping.".to_string(),
+                    message: "No OpenAI key -- skipping.".to_string(),
                     timestamp: Local::now().format("%H:%M:%S").to_string(),
                 });
                 continue;
@@ -214,7 +214,7 @@ pub fn spawn_oneshot(
         let Some(key) = &openai_key else {
             let _ = tx.send(AgentEvent {
                 task_name: def_clone.name.clone(),
-                message: "⚠️ No OpenAI key — skipping.".to_string(),
+                message: "No OpenAI key -- skipping.".to_string(),
                 timestamp: Local::now().format("%H:%M:%S").to_string(),
             });
             return;
