@@ -1,7 +1,10 @@
+//! MCP (Model Context Protocol) client — connection, tool invocation, and
+//! conversion helpers.
+
 pub mod config;
 pub mod oauth;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use rmcp::model::{CallToolRequestParam, CallToolResult, Tool as McpTool};
 use rmcp::service::RunningService;
 use rmcp::transport::StreamableHttpClientTransport;
@@ -12,12 +15,14 @@ use serde_json::{Value, json};
 use crate::mcp::config::McpServer;
 use crate::util::normalize_url;
 
+/// An active connection to a single MCP server.
 pub struct McpConnection {
     pub server: McpServer,
     pub client: RunningService<RoleClient, ()>,
     pub tool_cache: Vec<McpTool>,
 }
 
+/// Open a Streamable-HTTP connection to the given MCP server.
 pub async fn connect_http(server: &McpServer, bearer: Option<String>) -> Result<McpConnection> {
     let url = normalize_url(&server.url);
 
@@ -39,6 +44,7 @@ pub async fn connect_http(server: &McpServer, bearer: Option<String>) -> Result<
     })
 }
 
+/// Fetch the latest tool list from the connected MCP server.
 pub async fn refresh_tools(connection: &mut McpConnection) -> Result<Vec<McpTool>> {
     let tools = connection
         .client
@@ -49,6 +55,7 @@ pub async fn refresh_tools(connection: &mut McpConnection) -> Result<Vec<McpTool
     Ok(tools)
 }
 
+/// Invoke a named tool on the MCP server with the given JSON arguments.
 pub async fn call_tool(connection: &McpConnection, tool: &str, args: Value) -> Result<Value> {
     let arguments = match args {
         Value::Null => None,
@@ -69,6 +76,7 @@ pub async fn call_tool(connection: &McpConnection, tool: &str, args: Value) -> R
     Ok(value)
 }
 
+/// Convert MCP tool definitions into the OpenAI function-calling schema.
 pub fn tools_to_openai(tools: &[McpTool]) -> Result<Vec<Value>> {
     let mut openai_tools = Vec::new();
     for tool in tools {

@@ -1,9 +1,12 @@
+//! OAuth 2.0 browser flow for MCP servers — discovery, PKCE, token exchange,
+//! and local callback handling.
+
 use std::net::TcpListener;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::RngCore;
@@ -20,6 +23,7 @@ use crate::util::normalize_url;
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct OAuthToken {
     pub access_token: String,
     pub refresh_token: Option<String>,

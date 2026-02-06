@@ -1,3 +1,5 @@
+//! Rice SDK integration — state variables, memory traces, and focus.
+
 use std::env;
 
 use anyhow::{anyhow, Context, Result};
@@ -9,12 +11,14 @@ use serde_json::Value;
 use crate::constants::{APP_NAME, DEFAULT_RUN_ID};
 use crate::util::{env_first, normalize_url};
 
+/// Persistent store backed by the Rice State gRPC service.
 pub struct RiceStore {
     client: Option<Client>,
     pub status: RiceStatus,
     run_id: String,
 }
 
+/// Connection state of the Rice backend.
 #[derive(Clone, Debug)]
 pub enum RiceStatus {
     Connected,

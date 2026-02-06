@@ -1,6 +1,8 @@
+//! OpenAI API client — chat responses, embeddings, and response helpers.
+
 use anyhow::{anyhow, Context, Result};
 use reqwest::Client as HttpClient;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::constants::{
@@ -8,6 +10,7 @@ use crate::constants::{
 };
 use crate::util::env_first;
 
+/// A single tool-call extracted from an OpenAI response.
 #[derive(Clone, Debug)]
 pub struct ToolCall {
     pub name: String,
@@ -15,6 +18,7 @@ pub struct ToolCall {
     pub call_id: String,
 }
 
+/// Thin wrapper around the OpenAI HTTP API.
 #[derive(Clone)]
 pub struct OpenAiClient {
     pub model: String,
@@ -107,6 +111,7 @@ impl OpenAiClient {
     }
 }
 
+/// Pull the top-level `output` array from an OpenAI response.
 pub fn extract_output_items(response: &Value) -> Vec<Value> {
     response
         .get("output")
@@ -115,6 +120,7 @@ pub fn extract_output_items(response: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// Concatenate all `output_text` blocks from the output items into a single string.
 pub fn extract_output_text(output_items: &[Value]) -> String {
     let mut parts = Vec::new();
     for item in output_items {
@@ -137,6 +143,7 @@ pub fn extract_output_text(output_items: &[Value]) -> String {
     parts.join("\n")
 }
 
+/// Collect all `function_call` items into structured [`ToolCall`] values.
 pub fn extract_tool_calls(output_items: &[Value]) -> Vec<ToolCall> {
     let mut calls = Vec::new();
     for item in output_items {
@@ -165,15 +172,12 @@ pub fn extract_tool_calls(output_items: &[Value]) -> Vec<ToolCall> {
     calls
 }
 
+/// Returns `true` when the tool-call loop has hit the configured ceiling.
 pub fn tool_loop_limit_reached(tool_loops: usize) -> bool {
     tool_loops >= MAX_TOOL_LOOPS
 }
 
+/// Pretty-print any serialisable value as JSON, with a safe fallback.
 pub fn format_json<T: Serialize>(value: T) -> String {
     serde_json::to_string_pretty(&value).unwrap_or_else(|_| "<unrenderable>".to_string())
-}
-
-#[derive(Debug, Deserialize)]
-pub struct OpenAiErrorResponse {
-    pub error: Option<Value>,
 }

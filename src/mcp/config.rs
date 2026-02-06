@@ -1,3 +1,5 @@
+//! MCP server configuration — loading, lookup, and serialisation.
+
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,11 +10,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants::APP_NAME;
 
+/// Top-level MCP configuration containing one or more server entries.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct McpConfig {
     pub servers: Vec<McpServer>,
 }
 
+/// A single MCP server entry with connection and auth details.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct McpServer {
     pub id: String,
@@ -27,6 +31,7 @@ pub struct McpServer {
     pub auth: Option<McpAuth>,
 }
 
+/// Authentication configuration for a single MCP server.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct McpAuth {
     #[serde(rename = "type")]
@@ -63,6 +68,7 @@ impl McpServer {
     }
 }
 
+/// Where the MCP configuration was loaded from.
 #[derive(Clone, Debug)]
 pub enum McpSource {
     Embedded,

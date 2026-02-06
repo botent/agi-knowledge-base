@@ -1,3 +1,9 @@
+//! Memini CLI — an interactive TUI for chatting with OpenAI through MCP
+//! servers, backed by Rice for persistent memory.
+//!
+//! This binary sets up a full-screen terminal UI, delegates to [`app::App`]
+//! for all application logic, and tears the terminal down on exit.
+
 mod app;
 mod constants;
 mod mcp;
@@ -17,8 +23,11 @@ use ratatui::Terminal;
 
 use crate::app::App;
 
+// ── Entry point ──────────────────────────────────────────────────────
+
 fn main() -> Result<()> {
     dotenvy::dotenv().ok();
+
     let mut terminal = setup_terminal()?;
     let mut app = App::new()?;
 
@@ -28,6 +37,9 @@ fn main() -> Result<()> {
     run_result
 }
 
+// ── Terminal lifecycle ───────────────────────────────────────────────
+
+/// Enable raw mode, switch to the alternate screen, and create the backend.
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     terminal::enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
@@ -38,6 +50,7 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     Ok(terminal)
 }
 
+/// Restore the terminal to its original state.
 fn restore_terminal() -> Result<()> {
     terminal::disable_raw_mode().context("disable raw mode")?;
     let mut stdout = io::stdout();
@@ -46,6 +59,7 @@ fn restore_terminal() -> Result<()> {
     Ok(())
 }
 
+/// Main draw → poll → handle loop.
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
     loop {
         terminal.draw(|frame| app.draw(frame))?;
