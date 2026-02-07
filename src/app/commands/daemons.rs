@@ -297,8 +297,8 @@ impl App {
     }
 
     fn spawn_agent_window_cmd(&mut self, prompt: &str) {
-        let window_id = self.next_window_id;
-        self.next_window_id += 1;
+        use std::sync::atomic::Ordering;
+        let window_id = self.next_window_id.fetch_add(1, Ordering::SeqCst);
         let label = format!("Agent #{window_id}");
 
         // Create the window in Thinking state.

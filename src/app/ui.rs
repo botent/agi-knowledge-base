@@ -50,9 +50,23 @@ impl App {
         }
 
         // ── Input prompt ─────────────────────────────────────────────
-        let prompt_label = " Command ";
+        let prompt_label = if self.chat_busy {
+            " ⟳ Thinking… "
+        } else {
+            " Command "
+        };
+        let prompt_style = if self.chat_busy {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default()
+        };
         let input_panel = Paragraph::new(self.input.as_str())
-            .block(Block::default().borders(Borders::ALL).title(prompt_label));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(prompt_label)
+                    .border_style(prompt_style),
+            );
         frame.render_widget(input_panel, rows[2]);
 
         let input_width = rows[2].width.saturating_sub(2) as usize;
@@ -379,6 +393,14 @@ impl App {
                 agent_label.push_str(&format!(" ({waiting} waiting)"));
             }
             spans.push(Span::styled(agent_label, Style::default().fg(Color::Cyan)));
+        }
+        if self.chat_busy {
+            spans.push(Span::styled(
+                "  ⟳ Thinking…",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }

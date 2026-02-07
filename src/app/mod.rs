@@ -23,6 +23,8 @@ mod store;
 mod ui;
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 use anyhow::{Context, Result};
 use chrono::Local;
@@ -39,7 +41,7 @@ use crate::rice::RiceStore;
 use crate::util::env_first;
 
 use self::agents::Agent;
-use self::daemon::{AgentEvent, AgentWindow, AgentWindowStatus, DaemonHandle};
+use self::daemon::{AgentEvent, AgentWindow, AgentWindowStatus, ChatLogLevel, DaemonHandle};
 use self::logging::{LogContent, LogLevel, LogLine};
 use self::store::{LocalMcpStore, load_local_mcp_store};
 
@@ -94,11 +96,13 @@ pub struct App {
     pub(crate) daemon_results: Vec<(String, String, String)>, // (task_name, message, timestamp)
     // Agent windows (live interactive agents in side panel)
     pub(crate) agent_windows: Vec<AgentWindow>,
-    pub(crate) next_window_id: usize,
+    pub(crate) next_window_id: Arc<AtomicUsize>,
     pub(crate) focused_window: Option<usize>, // id of the focused window
     // Dashboard grid navigation
     pub(crate) view_mode: ViewMode,
     pub(crate) grid_selected: usize, // index into grid cells (0..8 for 3×3)
+    // Chat-in-progress flag (prevents double-sends and shows thinking UI)
+    pub(crate) chat_busy: bool,
 }
 
 // ── Lifecycle ────────────────────────────────────────────────────────
@@ -146,10 +150,11 @@ impl App {
             daemon_handles: Vec::new(),
             daemon_results: Vec::new(),
             agent_windows: Vec::new(),
-            next_window_id: 1,
+            next_window_id: Arc::new(AtomicUsize::new(1)),
             focused_window: None,
             view_mode: ViewMode::Dashboard,
             grid_selected: 0,
+            chat_busy: false,
         };
 
         app.log(
@@ -454,6 +459,24 @@ impl App {
         if line.starts_with('/') {
             self.handle_command(&line)?;
         } else {
+            // Prevent double-sends while the LLM is working.
+            if self.chat_busy {
+                self.log(
+                    LogLevel::Info,
+                    "Still thinking… please wait.".to_string(),
+                );
+                return Ok(());
+            }
+
+            // Show the user's message immediately in the activity log
+            // so they know the input was received.
+            self.log(
+                LogLevel::Info,
+                format!("› {line}"),
+            );
+            self.chat_busy = true;
+            // Launch the chat on a background task — returns immediately.
+            // chat_busy is cleared when we receive ChatFinished in drain_daemon_events.
             self.handle_chat_message(&line, false);
         }
 
@@ -609,6 +632,95 @@ impl App {
                     self.daemon_results.push((task_name, message, timestamp));
                     if self.daemon_results.len() > MAX_DAEMON_RESULTS {
                         self.daemon_results.remove(0);
+                    }
+                }
+
+                // ── Main-chat async events ───────────────────────────
+                AgentEvent::ChatProgress { line, level } => {
+                    let log_level = match level {
+                        ChatLogLevel::Info => LogLevel::Info,
+                        ChatLogLevel::Warn => LogLevel::Warn,
+                        ChatLogLevel::Error => LogLevel::Error,
+                    };
+                    self.log(log_level, line);
+                }
+                AgentEvent::ChatMarkdown { label, body } => {
+                    self.log_markdown(label, body);
+                }
+                AgentEvent::ChatFinished {
+                    user_message: _,
+                    output_text: _,
+                    agent_name: _,
+                    thread_entries,
+                } => {
+                    // Update conversation thread with this turn.
+                    for entry in thread_entries {
+                        self.conversation_thread.push(entry);
+                    }
+                    // Trim thread if over limit.
+                    let max = crate::constants::MAX_THREAD_MESSAGES;
+                    while self.conversation_thread.len() > max {
+                        self.conversation_thread.drain(0..2);
+                    }
+                    // Persist thread to Rice (best-effort).
+                    let _ = self
+                        .runtime
+                        .block_on(self.rice.save_thread(&self.conversation_thread));
+                    self.chat_busy = false;
+                }
+                AgentEvent::ChatSpawnAgent {
+                    window_id,
+                    label,
+                    prompt,
+                    mcp_snapshots,
+                    coordination_key,
+                    persona,
+                } => {
+                    // Create the agent window on the main thread.
+                    let window = AgentWindow {
+                        id: window_id,
+                        label: label.clone(),
+                        prompt: prompt.clone(),
+                        status: AgentWindowStatus::Thinking,
+                        output_lines: Vec::new(),
+                        pending_question: None,
+                        scroll: 0,
+                    };
+                    self.agent_windows.push(window);
+                    let idx = self.agent_windows.len().saturating_sub(1);
+                    self.grid_selected = idx;
+
+                    // Spawn the sub-agent background task.
+                    let tx = self.daemon_tx.clone();
+                    let openai = self.openai.clone();
+                    let key = self.openai_key.clone();
+                    let rice_handle = self.runtime.spawn(crate::rice::RiceStore::connect());
+                    let has_mcp = !mcp_snapshots.is_empty();
+
+                    if has_mcp {
+                        daemon::spawn_agent_window_with_mcp(
+                            window_id,
+                            coordination_key,
+                            persona,
+                            prompt,
+                            mcp_snapshots,
+                            tx,
+                            openai,
+                            key,
+                            rice_handle,
+                            self.runtime.handle().clone(),
+                        );
+                    } else {
+                        daemon::spawn_agent_window(
+                            window_id,
+                            persona,
+                            prompt,
+                            tx,
+                            openai,
+                            key,
+                            rice_handle,
+                            self.runtime.handle().clone(),
+                        );
                     }
                 }
             }

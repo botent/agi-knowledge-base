@@ -9,6 +9,7 @@
 //! output line-by-line so the user can watch the reasoning unfold.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use chrono::Local;
@@ -19,7 +20,7 @@ use tokio::sync::{Notify, mpsc};
 use crate::mcp;
 use crate::mcp::config::McpServer;
 use crate::openai::{self, OpenAiClient};
-use crate::rice::RiceStore;
+use crate::rice::{self, RiceStore};
 
 // ── Public types ─────────────────────────────────────────────────────
 
@@ -44,6 +45,37 @@ pub enum AgentEvent {
         message: String,
         timestamp: String,
     },
+
+    // ── Main-chat events (non-blocking chat flow) ────────────────
+    /// A progress/status line for the main chat (shows in activity log).
+    ChatProgress { line: String, level: ChatLogLevel },
+    /// Markdown output from the main chat LLM.
+    ChatMarkdown { label: String, body: String },
+    /// The main chat turn finished — update thread + commit to Rice.
+    ChatFinished {
+        user_message: String,
+        output_text: String,
+        #[allow(dead_code)]
+        agent_name: String,
+        thread_entries: Vec<Value>,
+    },
+    /// The LLM wants to spawn a sub-agent (from the background chat task).
+    ChatSpawnAgent {
+        window_id: usize,
+        label: String,
+        prompt: String,
+        mcp_snapshots: Vec<McpServerSnapshot>,
+        coordination_key: String,
+        persona: String,
+    },
+}
+
+/// Log level for ChatProgress events.
+#[derive(Clone, Debug)]
+pub enum ChatLogLevel {
+    Info,
+    Warn,
+    Error,
 }
 
 /// Live state of an agent window in the side panel.
@@ -771,4 +803,407 @@ pub fn spawn_agent_window_with_mcp(
             });
         }
     });
+}
+
+// ── Async main-chat task ─────────────────────────────────────────────
+
+/// All state the background chat task needs (fully owned / cloned).
+pub struct ChatTaskParams {
+    pub key: String,
+    pub message: String,
+    pub persona: String,
+    pub agent_name: String,
+    pub memory_limit: u64,
+    pub conversation_thread: Vec<Value>,
+    pub mcp_snapshots: Vec<McpServerSnapshot>,
+    pub builtin_tools: Vec<Value>,
+    pub next_window_id: Arc<AtomicUsize>,
+}
+
+/// Spawn the main chat turn on a background tokio task.
+///
+/// Sends real-time `ChatProgress` / `ChatMarkdown` / `ChatFinished` events
+/// through `tx` so the TUI keeps rendering and the user sees progress live.
+pub fn spawn_chat_task(
+    params: ChatTaskParams,
+    tx: mpsc::UnboundedSender<AgentEvent>,
+    openai: OpenAiClient,
+    rice_future: tokio::task::JoinHandle<RiceStore>,
+    rt: tokio::runtime::Handle,
+) {
+    rt.spawn(async move {
+        let ChatTaskParams {
+            key,
+            message,
+            persona,
+            agent_name,
+            memory_limit,
+            conversation_thread,
+            mcp_snapshots,
+            builtin_tools,
+            next_window_id,
+        } = params;
+
+        let mut rice = match rice_future.await {
+            Ok(r) => r,
+            Err(_) => {
+                let _ = tx.send(AgentEvent::ChatProgress {
+                    line: "Could not connect to Rice.".to_string(),
+                    level: ChatLogLevel::Error,
+                });
+                let _ = tx.send(AgentEvent::ChatFinished {
+                    user_message: message,
+                    output_text: String::new(),
+                    agent_name,
+                    thread_entries: Vec::new(),
+                });
+                return;
+            }
+        };
+
+        // ── Step 1: Focus Rice ───────────────────────────────────────
+        let _ = rice.focus(&message).await;
+
+        // ── Step 2: Recall memories ──────────────────────────────────
+        let _ = tx.send(AgentEvent::ChatProgress {
+            line: "⟳ Recalling memories…".to_string(),
+            level: ChatLogLevel::Info,
+        });
+
+        let memories = match rice.reminisce(vec![], memory_limit, &message).await {
+            Ok(traces) => traces,
+            Err(err) => {
+                let _ = tx.send(AgentEvent::ChatProgress {
+                    line: format!("Rice recall failed: {err:#}"),
+                    level: ChatLogLevel::Warn,
+                });
+                Vec::new()
+            }
+        };
+
+        if !memories.is_empty() {
+            let _ = tx.send(AgentEvent::ChatProgress {
+                line: format!("Recalled {} memory(ies).", memories.len()),
+                level: ChatLogLevel::Info,
+            });
+        }
+
+        // ── Step 3: Connect to MCP servers ───────────────────────────
+        let mut connections: Vec<mcp::McpConnection> = Vec::new();
+        let mut all_tools: Vec<Value> = Vec::new();
+
+        for snap in &mcp_snapshots {
+            let _ = tx.send(AgentEvent::ChatProgress {
+                line: format!("⟳ Connecting to MCP: {}…", snap.server.display_name()),
+                level: ChatLogLevel::Info,
+            });
+
+            match mcp::connect_http(&snap.server, snap.bearer.clone()).await {
+                Ok(mut conn) => {
+                    match mcp::refresh_tools(&mut conn).await {
+                        Ok(tools) => {
+                            let _ = tx.send(AgentEvent::ChatProgress {
+                                line: format!(
+                                    "Connected to {} ({} tools).",
+                                    snap.server.display_name(),
+                                    tools.len()
+                                ),
+                                level: ChatLogLevel::Info,
+                            });
+                            if let Ok(oai_tools) =
+                                mcp::tools_to_openai_namespaced(&snap.server, &tools)
+                            {
+                                all_tools.extend(oai_tools);
+                            }
+                        }
+                        Err(err) => {
+                            let _ = tx.send(AgentEvent::ChatProgress {
+                                line: format!(
+                                    "Tools refresh failed for {}: {err:#}",
+                                    snap.server.display_name()
+                                ),
+                                level: ChatLogLevel::Warn,
+                            });
+                            all_tools.extend(snap.openai_tools.clone());
+                        }
+                    }
+                    connections.push(conn);
+                }
+                Err(err) => {
+                    let _ = tx.send(AgentEvent::ChatProgress {
+                        line: format!(
+                            "MCP connect failed for {}: {err:#}",
+                            snap.server.display_name()
+                        ),
+                        level: ChatLogLevel::Warn,
+                    });
+                    all_tools.extend(snap.openai_tools.clone());
+                }
+            }
+        }
+
+        // Add built-in tools (spawn_agent, collect_results).
+        all_tools.extend(builtin_tools);
+
+        // ── Step 4: Build LLM input ──────────────────────────────────
+        let memory_context = rice::format_memories(&memories);
+        let sys = rice::system_prompt(&persona, !mcp_snapshots.is_empty());
+        let mut input: Vec<Value> = Vec::new();
+        input.push(json!({"role": "system", "content": sys}));
+        if !memory_context.is_empty() {
+            input.push(json!({"role": "system", "content": memory_context}));
+        }
+        for msg in &conversation_thread {
+            input.push(msg.clone());
+        }
+        input.push(json!({"role": "user", "content": message}));
+
+        let tools_opt: Option<&[Value]> = if all_tools.is_empty() {
+            None
+        } else {
+            Some(&all_tools)
+        };
+
+        // ── Step 5: Initial LLM call ─────────────────────────────────
+        let _ = tx.send(AgentEvent::ChatProgress {
+            line: "⟳ Thinking…".to_string(),
+            level: ChatLogLevel::Info,
+        });
+
+        let mut response = match openai.response(&key, &input, tools_opt).await {
+            Ok(r) => r,
+            Err(err) => {
+                let _ = tx.send(AgentEvent::ChatProgress {
+                    line: format!("OpenAI request failed: {err:#}"),
+                    level: ChatLogLevel::Error,
+                });
+                let _ = tx.send(AgentEvent::ChatFinished {
+                    user_message: message,
+                    output_text: String::new(),
+                    agent_name,
+                    thread_entries: Vec::new(),
+                });
+                return;
+            }
+        };
+
+        let mut output_items = openai::extract_output_items(&response);
+        if !output_items.is_empty() {
+            input.extend(output_items.clone());
+        }
+        let mut output_text = openai::extract_output_text(&output_items);
+        let mut tool_calls = openai::extract_tool_calls(&output_items);
+        let mut tool_loops = 0usize;
+
+        // ── Step 6: Tool-call loop ───────────────────────────────────
+        while !tool_calls.is_empty() {
+            if openai::tool_loop_limit_reached(tool_loops) {
+                let _ = tx.send(AgentEvent::ChatProgress {
+                    line: "Tool loop limit reached.".to_string(),
+                    level: ChatLogLevel::Warn,
+                });
+                break;
+            }
+            tool_loops += 1;
+
+            for call in &tool_calls {
+                let _ = tx.send(AgentEvent::ChatProgress {
+                    line: format!("⚙ Calling tool: {}", call.name),
+                    level: ChatLogLevel::Info,
+                });
+
+                let tool_output = if call.name == "spawn_agent" {
+                    handle_spawn_agent_bg(call, &mcp_snapshots, &next_window_id, &tx, &persona)
+                } else if call.name == "collect_results" {
+                    handle_collect_results_bg(call, &mut rice).await
+                } else {
+                    // MCP tool call.
+                    if let Some((server_id, tool_name)) =
+                        mcp::split_namespaced_tool_name(&call.name)
+                    {
+                        if let Some(conn) = connections.iter().find(|c| c.server.id == server_id) {
+                            match mcp::call_tool(conn, tool_name, call.arguments.clone()).await {
+                                Ok(value) => {
+                                    let _ = tx.send(AgentEvent::ChatProgress {
+                                        line: format!("✓ Tool {} returned.", call.name),
+                                        level: ChatLogLevel::Info,
+                                    });
+                                    serde_json::to_string(&value)
+                                        .unwrap_or_else(|_| "{}".to_string())
+                                }
+                                Err(err) => format!(r#"{{"error":"{err}"}}"#),
+                            }
+                        } else {
+                            format!(r#"{{"error":"No MCP connection for server '{server_id}'"}}"#)
+                        }
+                    } else {
+                        format!(r#"{{"error":"Unknown tool '{}'"}}"#, call.name)
+                    }
+                };
+
+                input.push(json!({
+                    "type": "function_call_output",
+                    "call_id": call.call_id,
+                    "output": tool_output
+                }));
+            }
+
+            let _ = tx.send(AgentEvent::ChatProgress {
+                line: "⟳ Thinking…".to_string(),
+                level: ChatLogLevel::Info,
+            });
+
+            response = match openai.response(&key, &input, tools_opt).await {
+                Ok(r) => r,
+                Err(err) => {
+                    let _ = tx.send(AgentEvent::ChatProgress {
+                        line: format!("OpenAI request failed: {err:#}"),
+                        level: ChatLogLevel::Error,
+                    });
+                    break;
+                }
+            };
+            output_items = openai::extract_output_items(&response);
+            if !output_items.is_empty() {
+                input.extend(output_items.clone());
+            }
+            output_text = openai::extract_output_text(&output_items);
+            tool_calls = openai::extract_tool_calls(&output_items);
+        }
+
+        // ── Step 7: Send result ──────────────────────────────────────
+        if output_text.is_empty() {
+            let _ = tx.send(AgentEvent::ChatProgress {
+                line: "No response received.".to_string(),
+                level: ChatLogLevel::Warn,
+            });
+        } else {
+            let _ = tx.send(AgentEvent::ChatMarkdown {
+                label: agent_name.clone(),
+                body: output_text.clone(),
+            });
+        }
+
+        // ── Step 8: Commit to Rice ───────────────────────────────────
+        let mut thread_entries = Vec::new();
+        thread_entries.push(json!({"role": "user", "content": message}));
+        if !output_text.is_empty() {
+            thread_entries.push(json!({"role": "assistant", "content": output_text.clone()}));
+        }
+
+        let aid = rice::agent_id_for(&agent_name);
+        let _ = rice
+            .commit_trace(&message, &output_text, "chat", vec![], &aid)
+            .await;
+
+        let _ = tx.send(AgentEvent::ChatFinished {
+            user_message: message,
+            output_text,
+            agent_name,
+            thread_entries,
+        });
+    });
+}
+
+/// Handle `spawn_agent` tool call from the background chat task.
+fn handle_spawn_agent_bg(
+    call: &openai::ToolCall,
+    mcp_snapshots: &[McpServerSnapshot],
+    next_window_id: &Arc<AtomicUsize>,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+    persona: &str,
+) -> String {
+    let label = call
+        .arguments
+        .get("label")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Sub-Agent")
+        .to_string();
+    let prompt = call
+        .arguments
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mcp_server_filter = call
+        .arguments
+        .get("mcp_server")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let coordination_key = call
+        .arguments
+        .get("coordination_key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if prompt.is_empty() {
+        return r#"{"error":"prompt is required"}"#.to_string();
+    }
+
+    let window_id = next_window_id.fetch_add(1, Ordering::SeqCst);
+
+    // Filter snapshots if a specific server was requested.
+    let filtered: Vec<McpServerSnapshot> = if let Some(filter) = &mcp_server_filter {
+        mcp_snapshots
+            .iter()
+            .filter(|s| s.server.id == *filter)
+            .cloned()
+            .collect()
+    } else {
+        mcp_snapshots.to_vec()
+    };
+
+    let has_mcp = !filtered.is_empty();
+
+    // Send event to main thread to create the window + spawn the sub-agent.
+    let _ = tx.send(AgentEvent::ChatSpawnAgent {
+        window_id,
+        label: label.clone(),
+        prompt: prompt.clone(),
+        mcp_snapshots: filtered,
+        coordination_key: coordination_key.clone(),
+        persona: persona.to_string(),
+    });
+
+    let _ = tx.send(AgentEvent::ChatProgress {
+        line: format!("↗ Spawned agent: {label} (#{window_id})"),
+        level: ChatLogLevel::Info,
+    });
+
+    format!(
+        r#"{{"status":"spawned","window_id":{window_id},"label":"{label}","has_mcp":{has_mcp},"coordination_key":"{coordination_key}"}}"#,
+    )
+}
+
+/// Handle `collect_results` tool call from the background chat task.
+async fn handle_collect_results_bg(call: &openai::ToolCall, rice: &mut RiceStore) -> String {
+    let coordination_key = call
+        .arguments
+        .get("coordination_key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if coordination_key.is_empty() {
+        return r#"{"error":"coordination_key is required"}"#.to_string();
+    }
+
+    // Scan Rice variables for this coordination key (window IDs 1..50).
+    let mut results: Vec<Value> = Vec::new();
+    for wid in 1..50usize {
+        let coord_var = format!("agent_result:{coordination_key}:{wid}");
+        if let Ok(Some(value)) = rice.get_variable(&coord_var).await {
+            results.push(value);
+        }
+    }
+
+    let summary = json!({
+        "coordination_key": coordination_key,
+        "agent_count": results.len(),
+        "results": results,
+    });
+
+    serde_json::to_string(&summary)
+        .unwrap_or_else(|_| r#"{"error":"serialize failed"}"#.to_string())
 }
