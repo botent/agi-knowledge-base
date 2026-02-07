@@ -8,11 +8,13 @@ use serde_json::{Value, json};
 use crate::constants::OPENAI_KEY_VAR;
 use crate::mcp;
 use crate::openai::{
-    extract_output_items, extract_output_text, extract_tool_calls, tool_loop_limit_reached,
+    ToolCall, extract_output_items, extract_output_text, extract_tool_calls,
+    tool_loop_limit_reached,
 };
 use crate::rice::{agent_id_for, format_memories, system_prompt};
 
 use super::App;
+use super::daemon;
 use super::log_src;
 use super::logging::{LogLevel, mask_key};
 
@@ -32,11 +34,7 @@ impl App {
         };
 
         if require_mcp && self.mcp_connections.is_empty() {
-            log_src!(
-                self,
-                LogLevel::Warn,
-                "No MCP connections.".to_string()
-            );
+            log_src!(self, LogLevel::Warn, "No MCP connections.".to_string());
             return;
         }
 
@@ -81,7 +79,7 @@ impl App {
         // New user message.
         input.push(json!({"role": "user", "content": message}));
 
-        let tools = match self.openai_tools_for_mcp(require_mcp) {
+        let mut tools = match self.openai_tools_for_mcp(require_mcp) {
             Ok(t) => t,
             Err(err) => {
                 log_src!(
@@ -92,6 +90,29 @@ impl App {
                 return;
             }
         };
+
+        // Always inject the built-in spawn_agent tool so the LLM can
+        // delegate sub-tasks to parallel agent windows.
+        let spawn_tool = json!({
+            "type": "function",
+            "name": "spawn_agent",
+            "description": "Spawn an independent sub-agent that runs in its own window in the user's grid layout. Use this to delegate sub-tasks that can run in parallel. Each agent gets its own memory context and streams output in real time.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "label": {
+                        "type": "string",
+                        "description": "Short name for the agent window (e.g. 'Research', 'Code Review', 'Summarizer')"
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "The detailed task prompt for the sub-agent. Be specific about what it should do."
+                    }
+                },
+                "required": ["label", "prompt"]
+            }
+        });
+        tools.get_or_insert_with(Vec::new).push(spawn_tool);
 
         // Initial LLM request.
         let mut response =
@@ -128,9 +149,15 @@ impl App {
 
             for call in tool_calls {
                 self.log(LogLevel::Info, format!("Calling tool: {}", call.name));
-                let tool_output = match self.call_mcp_tool_value(&call.name, call.arguments) {
-                    Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string()),
-                    Err(err) => format!("{{\"error\":\"{err}\"}}"),
+                let tool_output = if call.name == "spawn_agent" {
+                    self.handle_spawn_agent_tool(&call)
+                } else {
+                    match self.call_mcp_tool_value(&call.name, call.arguments) {
+                        Ok(value) => {
+                            serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string())
+                        }
+                        Err(err) => format!("{{\"error\":\"{err}\"}}"),
+                    }
                 };
                 input.push(json!({
                     "type": "function_call_output",
@@ -280,5 +307,74 @@ impl App {
         }
 
         Err(anyhow!("OpenAI key not configured"))
+    }
+
+    /// Handle the built-in `spawn_agent` tool call from the LLM.
+    /// Creates an agent window and spawns the background task, returning
+    /// a JSON status string to feed back to the model.
+    fn handle_spawn_agent_tool(&mut self, call: &ToolCall) -> String {
+        let label = call
+            .arguments
+            .get("label")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Sub-Agent")
+            .to_string();
+        let prompt = call
+            .arguments
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        if prompt.is_empty() {
+            return r#"{"error":"prompt is required"}"#.to_string();
+        }
+
+        let window_id = self.next_window_id;
+        self.next_window_id += 1;
+
+        // Create the window in Thinking state so it appears in the grid.
+        let window = daemon::AgentWindow {
+            id: window_id,
+            label: label.clone(),
+            prompt: prompt.clone(),
+            status: daemon::AgentWindowStatus::Thinking,
+            output_lines: Vec::new(),
+            pending_question: None,
+            scroll: 0,
+        };
+        self.agent_windows.push(window);
+
+        // Select the new agent in the grid.
+        let idx = self.agent_windows.len().saturating_sub(1);
+        self.grid_selected = idx;
+
+        // Spawn the background task.
+        let tx = self.daemon_tx.clone();
+        let openai = self.openai.clone();
+        let key = self.openai_key.clone();
+        let rice_handle = self.runtime.spawn(crate::rice::RiceStore::connect());
+        let persona = self.active_agent.persona.clone();
+
+        daemon::spawn_agent_window(
+            window_id,
+            persona,
+            prompt,
+            tx,
+            openai,
+            key,
+            rice_handle,
+            self.runtime.handle().clone(),
+        );
+
+        self.log(
+            LogLevel::Info,
+            format!("LLM spawned agent: {label} (window #{window_id})"),
+        );
+
+        format!(
+            r#"{{"status":"spawned","window_id":{window_id},"label":"{}"}}"#,
+            label
+        )
     }
 }

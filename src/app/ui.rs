@@ -38,10 +38,9 @@ impl App {
         self.draw_status_bar(frame, rows[0]);
 
         // ── Main area: activity log (left) + agent grid (right) ──────
-        if self.agent_windows.is_empty() && self.daemon_handles.is_empty() {
-            // No agents yet — show full-width activity log with hint.
-            self.draw_activity_log(frame, rows[1]);
-        } else {
+        // Always show the split layout with the grid so it feels like the
+        // default dashboard. Empty cells render as placeholder cards.
+        {
             let cols = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])

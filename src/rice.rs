@@ -129,10 +129,7 @@ impl RiceStore {
                     .as_mut()
                     .ok_or_else(|| anyhow!("Rice state module not enabled"))?;
                 state
-                    .delete_variable(
-                        self.run_id.clone(),
-                        SHARED_WORKSPACE_VAR.to_string(),
-                    )
+                    .delete_variable(self.run_id.clone(), SHARED_WORKSPACE_VAR.to_string())
                     .await
                     .context("clear shared workspace")?;
             }
@@ -151,10 +148,7 @@ impl RiceStore {
             .as_mut()
             .ok_or_else(|| anyhow!("Rice state module not enabled"))?;
         let variable = state
-            .get_variable(
-                self.run_id.clone(),
-                SHARED_WORKSPACE_VAR.to_string(),
-            )
+            .get_variable(self.run_id.clone(), SHARED_WORKSPACE_VAR.to_string())
             .await
             .context("load shared workspace")?;
         if variable.value_json.trim().is_empty() {
@@ -178,12 +172,7 @@ impl RiceStore {
             .ok_or_else(|| anyhow!("Rice state module not enabled"))?;
         let value_json = serde_json::to_string(&value).context("serialize value")?;
         state
-            .set_variable(
-                rid,
-                name.to_string(),
-                value_json,
-                source.to_string(),
-            )
+            .set_variable(rid, name.to_string(), value_json, source.to_string())
             .await
             .context("set variable")?;
         Ok(())
@@ -261,12 +250,7 @@ impl RiceStore {
             .as_mut()
             .ok_or_else(|| anyhow!("Rice state module not enabled"))?;
         let response = state
-            .reminisce(
-                embedding,
-                limit,
-                query_text.to_string(),
-                rid,
-            )
+            .reminisce(embedding, limit, query_text.to_string(), rid)
             .await
             .context("reminisce")?;
         Ok(response.traces)
@@ -327,7 +311,8 @@ impl RiceStore {
     // ── Agent persistence ────────────────────────────────────────────
 
     pub async fn save_custom_agents(&mut self, agents_json: Value) -> Result<()> {
-        self.set_variable(CUSTOM_AGENTS_VAR, agents_json, "agent").await
+        self.set_variable(CUSTOM_AGENTS_VAR, agents_json, "agent")
+            .await
     }
 
     pub async fn load_custom_agents(&mut self) -> Result<Option<Value>> {
@@ -335,12 +320,8 @@ impl RiceStore {
     }
 
     pub async fn save_active_agent_name(&mut self, name: &str) -> Result<()> {
-        self.set_variable(
-            ACTIVE_AGENT_VAR,
-            Value::String(name.to_string()),
-            "agent",
-        )
-        .await
+        self.set_variable(ACTIVE_AGENT_VAR, Value::String(name.to_string()), "agent")
+            .await
     }
 
     pub async fn load_active_agent_name(&mut self) -> Result<Option<String>> {
@@ -406,15 +387,27 @@ pub fn format_memories(traces: &[Trace]) -> String {
 
 pub fn system_prompt(persona: &str, require_mcp: bool) -> String {
     let now = chrono::Local::now().format("%A, %B %e, %Y at %H:%M");
+    let agent_instructions = "\
+        You can spawn sub-agents to work on tasks in parallel by calling the `spawn_agent` tool. \
+        Each spawned agent runs independently in its own window and the user can see all of them \
+        in a grid layout. Use spawn_agent when: \
+        (1) a task can be broken into independent sub-tasks that benefit from parallel execution, \
+        (2) the user asks for multiple things at once, or \
+        (3) a task requires a different specialist perspective. \
+        Give each agent a clear, specific prompt describing exactly what it should do. \
+        After spawning agents, briefly tell the user what you delegated and why.";
+
     if require_mcp {
         format!(
             "{persona} The current date and time is {now}. \
-             Use available tools when needed to answer the user's request. Summarize results clearly."
+             Use available tools when needed to answer the user's request. Summarize results clearly. \
+             {agent_instructions}"
         )
     } else {
         format!(
             "{persona} The current date and time is {now}. \
-             Use any provided memory context when helpful and answer clearly."
+             Use any provided memory context when helpful and answer clearly. \
+             {agent_instructions}"
         )
     }
 }
