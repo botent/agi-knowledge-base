@@ -103,6 +103,12 @@ Connect to Notion:
 /mcp connect notion
 ```
 
+On startup, Memini auto-connects to every configured MCP server that already
+has a stored token (set `MEMINI_MCP_AUTOCONNECT=0` to disable).
+
+When multiple MCP servers are connected, tools are namespaced as `id__tool`
+(for example: `notion__search`).
+
 ## Commands
 
 - `(no slash) chat message`

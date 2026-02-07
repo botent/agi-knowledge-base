@@ -34,9 +34,15 @@ impl App {
                     log_src!(self, LogLevel::Warn, "Usage: /mcp connect <id>".to_string());
                 }
             }
-            "disconnect" => self.disconnect_mcp(),
+            "disconnect" => {
+                let target = args.get(1).copied();
+                self.disconnect_mcp(target);
+            }
             "status" => self.show_mcp_status(),
-            "tools" => self.list_mcp_tools(),
+            "tools" => {
+                let target = args.get(1).copied();
+                self.list_mcp_tools(target);
+            }
             "call" => {
                 let tool = args.get(1).copied();
                 let rest = if args.len() > 2 { &args[2..] } else { &[] };
@@ -163,6 +169,29 @@ impl App {
             return;
         }
 
+        // Already connected? Just mark it active.
+        if self.mcp_connections.contains_key(&server.id) {
+            self.active_mcp = Some(server.clone());
+            let store_result = self.runtime.block_on(self.rice.set_variable(
+                ACTIVE_MCP_VAR,
+                serde_json::to_value(&server).unwrap_or(Value::Null),
+                "explicit",
+            ));
+            if let Err(err) = store_result {
+                log_src!(
+                    self,
+                    LogLevel::Warn,
+                    format!("Failed to persist MCP: {err:#}")
+                );
+            }
+            self.log(
+                LogLevel::Info,
+                format!("Using existing MCP connection to {}.", server.display_name()),
+            );
+            self.list_mcp_tools(Some(&server.id));
+            return;
+        }
+
         let bearer = self.resolve_mcp_token(&server);
         if bearer.is_none() {
             if let Some(auth) = &server.auth {
@@ -183,7 +212,8 @@ impl App {
         match connect_result {
             Ok(connection) => {
                 self.active_mcp = Some(server.clone());
-                self.mcp_connection = Some(connection);
+                self.mcp_connections
+                    .insert(server.id.clone(), connection);
 
                 let store_result = self.runtime.block_on(self.rice.set_variable(
                     ACTIVE_MCP_VAR,
@@ -210,7 +240,7 @@ impl App {
                     ),
                 }
 
-                self.list_mcp_tools();
+                self.list_mcp_tools(Some(&server.id));
             }
             Err(err) => {
                 log_src!(
@@ -222,12 +252,162 @@ impl App {
         }
     }
 
-    fn disconnect_mcp(&mut self) {
-        if self.mcp_connection.is_some() {
-            self.mcp_connection = None;
-            self.log(LogLevel::Info, "MCP connection closed.".to_string());
-        } else {
+    fn disconnect_mcp(&mut self, target: Option<&str>) {
+        if self.mcp_connections.is_empty() {
+            self.log(LogLevel::Info, "No MCP connections to close.".to_string());
+            return;
+        }
+
+        if matches!(target, Some("all")) {
+            let count = self.mcp_connections.len();
+            self.mcp_connections.clear();
+            self.log(LogLevel::Info, format!("Closed {count} MCP connection(s)."));
+            return;
+        }
+
+        let resolved_id = target
+            .and_then(|q| self.mcp_config.find_by_id_or_name(q))
+            .map(|server| server.id)
+            .or_else(|| self.active_mcp.as_ref().map(|s| s.id.clone()))
+            .or_else(|| self.mcp_connections.keys().next().cloned());
+
+        let Some(id) = resolved_id else {
             self.log(LogLevel::Info, "No MCP connection to close.".to_string());
+            return;
+        };
+
+        if self.mcp_connections.remove(&id).is_some() {
+            self.log(LogLevel::Info, format!("Closed MCP connection '{id}'."));
+        } else {
+            self.log(LogLevel::Info, format!("No active MCP connection for '{id}'."));
+        }
+    }
+}
+
+// ── Startup auto-connect ─────────────────────────────────────────────
+
+impl App {
+    /// Auto-connect to every configured MCP server that already has usable
+    /// credentials stored (or requires no auth). This runs during startup.
+    pub(crate) fn autoconnect_saved_mcps(&mut self) {
+        let enabled = match env::var("MEMINI_MCP_AUTOCONNECT") {
+            Ok(value) => {
+                let value = value.to_ascii_lowercase();
+                !(value == "0" || value == "false" || value == "no" || value == "off")
+            }
+            Err(_) => true,
+        };
+        if !enabled {
+            return;
+        }
+
+        if self.mcp_config.servers.is_empty() {
+            return;
+        }
+
+        let mut connect_plan: Vec<(McpServer, Option<String>)> = Vec::new();
+        for server in self.mcp_config.servers.clone() {
+            if self.mcp_connections.contains_key(&server.id) {
+                continue;
+            }
+
+            let bearer = self.resolve_mcp_token(&server);
+            let has_token = bearer
+                .as_ref()
+                .map(|t| !t.trim().is_empty())
+                .unwrap_or(false);
+
+            let should_connect = match server.auth.as_ref().map(|a| a.auth_type.as_str()) {
+                Some("oauth_browser") => has_token,
+                Some(_) => has_token,
+                None => true,
+            };
+
+            if should_connect {
+                connect_plan.push((server, bearer));
+            }
+        }
+
+        if connect_plan.is_empty() {
+            return;
+        }
+
+        self.log(
+            LogLevel::Info,
+            format!("Auto-connecting {} MCP server(s)…", connect_plan.len()),
+        );
+
+        let connect_timeout = Duration::from_secs(10);
+        let tools_timeout = Duration::from_secs(10);
+
+        for (server, bearer) in connect_plan {
+            let id = server.id.clone();
+            let label = server.display_name();
+
+            let connect_result = self.runtime.block_on(async {
+                tokio::time::timeout(connect_timeout, mcp::connect_http(&server, bearer.clone()))
+                    .await
+            });
+
+            let connection = match connect_result {
+                Ok(Ok(connection)) => connection,
+                Ok(Err(err)) => {
+                    log_src!(
+                        self,
+                        LogLevel::Warn,
+                        format!("Auto-connect failed for {label}: {err:#}")
+                    );
+                    continue;
+                }
+                Err(_) => {
+                    log_src!(
+                        self,
+                        LogLevel::Warn,
+                        format!("Auto-connect timed out for {label}.")
+                    );
+                    continue;
+                }
+            };
+
+            self.mcp_connections.insert(id.clone(), connection);
+
+            let tools_result = {
+                let Some(conn) = self.mcp_connections.get_mut(&id) else {
+                    continue;
+                };
+                self.runtime.block_on(async {
+                    tokio::time::timeout(tools_timeout, mcp::refresh_tools(conn)).await
+                })
+            };
+
+            match tools_result {
+                Ok(Ok(tools)) => {
+                    self.log(
+                        LogLevel::Info,
+                        format!("Connected MCP: {label} ({} tools).", tools.len()),
+                    );
+                }
+                Ok(Err(err)) => {
+                    log_src!(
+                        self,
+                        LogLevel::Warn,
+                        format!("Connected {label}, but tool list failed: {err:#}")
+                    );
+                }
+                Err(_) => {
+                    log_src!(
+                        self,
+                        LogLevel::Warn,
+                        format!("Connected {label}, but tool list timed out.")
+                    );
+                }
+            }
+        }
+
+        if self.active_mcp.is_none() {
+            if let Some(connection) = self.mcp_connections.values().next() {
+                self.active_mcp = Some(connection.server.clone());
+            }
         }
     }
 }
@@ -236,36 +416,71 @@ impl App {
 
 impl App {
     /// Refresh and display the tool list from the active MCP connection.
-    pub(crate) fn list_mcp_tools(&mut self) {
-        let tools_result = {
-            let Some(connection) = self.mcp_connection.as_mut() else {
-                log_src!(
-                    self,
-                    LogLevel::Warn,
-                    "No active MCP connection.".to_string()
-                );
-                return;
-            };
-            self.runtime.block_on(mcp::refresh_tools(connection))
-        };
+    pub(crate) fn list_mcp_tools(&mut self, target: Option<&str>) {
+        if self.mcp_connections.is_empty() {
+            log_src!(
+                self,
+                LogLevel::Warn,
+                "No active MCP connections.".to_string()
+            );
+            return;
+        }
 
-        match tools_result {
-            Ok(tools) => {
-                if tools.is_empty() {
-                    self.log(LogLevel::Info, "No tools reported by MCP.".to_string());
-                } else {
-                    self.log(LogLevel::Info, "MCP tools:".to_string());
-                    for tool in tools {
-                        self.log(LogLevel::Info, format!("- {}", tool.name));
+        let mut ids = Vec::new();
+        if matches!(target, Some("all")) || (target.is_none() && self.active_mcp.is_none()) {
+            ids.extend(self.mcp_connections.keys().cloned());
+        } else if let Some(target) = target {
+            if let Some(server) = self.mcp_config.find_by_id_or_name(target) {
+                ids.push(server.id);
+            } else {
+                ids.push(target.to_string());
+            }
+        } else if let Some(active) = &self.active_mcp {
+            ids.push(active.id.clone());
+        }
+
+        if ids.is_empty() {
+            log_src!(
+                self,
+                LogLevel::Warn,
+                "No MCP server selected.".to_string()
+            );
+            return;
+        }
+
+        for id in ids {
+            let Some(connection) = self.mcp_connections.get_mut(&id) else {
+                log_src!(self, LogLevel::Warn, format!("Not connected: {id}"));
+                continue;
+            };
+
+            let tools_result = self.runtime.block_on(mcp::refresh_tools(connection));
+
+            match tools_result {
+                Ok(tools) => {
+                    if tools.is_empty() {
+                        self.log(
+                            LogLevel::Info,
+                            format!("No tools reported by MCP server '{id}'."),
+                        );
+                    } else {
+                        self.log(
+                            LogLevel::Info,
+                            format!("MCP tools ({id}):"),
+                        );
+                        for tool in tools {
+                            let name = mcp::namespaced_tool_name(&id, tool.name.as_ref());
+                            self.log(LogLevel::Info, format!("- {}", name));
+                        }
                     }
                 }
-            }
-            Err(err) => {
-                log_src!(
-                    self,
-                    LogLevel::Error,
-                    format!("Failed to list tools: {err:#}")
-                );
+                Err(err) => {
+                    log_src!(
+                        self,
+                        LogLevel::Error,
+                        format!("Failed to list tools for {id}: {err:#}")
+                    );
+                }
             }
         }
     }
@@ -280,19 +495,30 @@ impl App {
             return;
         };
 
-        let tool_cache = match self.mcp_connection.as_ref() {
-            Some(connection) => connection.tool_cache.clone(),
-            None => {
-                log_src!(
-                    self,
-                    LogLevel::Warn,
-                    "No active MCP connection.".to_string()
-                );
+        if self.mcp_connections.is_empty() {
+            log_src!(
+                self,
+                LogLevel::Warn,
+                "No active MCP connections.".to_string()
+            );
+            return;
+        }
+
+        let (server_id, tool_name) = match self.resolve_tool_target(tool) {
+            Ok(result) => result,
+            Err(err) => {
+                log_src!(self, LogLevel::Error, format!("{err:#}"));
                 return;
             }
         };
 
-        if !tool_cache.is_empty() && !tool_cache.iter().any(|t| t.name == tool) {
+        let tool_cache = self
+            .mcp_connections
+            .get(&server_id)
+            .map(|connection| connection.tool_cache.clone())
+            .unwrap_or_default();
+
+        if !tool_cache.is_empty() && !tool_cache.iter().any(|t| t.name == tool_name) {
             log_src!(
                 self,
                 LogLevel::Warn,
@@ -313,7 +539,8 @@ impl App {
             }
         };
 
-        match self.call_mcp_tool_value(tool, arg_value) {
+        let namespaced = mcp::namespaced_tool_name(&server_id, tool_name);
+        match self.call_mcp_tool_value(&namespaced, arg_value) {
             Ok(value) => {
                 let rendered = format_json(value);
                 self.log(LogLevel::Info, format!("Tool {tool} result:"));
@@ -327,27 +554,55 @@ impl App {
 
     /// Invoke a single MCP tool and return its raw result.
     pub(crate) fn call_mcp_tool_value(&mut self, tool: &str, arg_value: Value) -> Result<Value> {
+        let (server_id, tool_name) = self.resolve_tool_target(tool)?;
         let connection = self
-            .mcp_connection
-            .as_ref()
-            .ok_or_else(|| anyhow!("No active MCP connection"))?;
+            .mcp_connections
+            .get(&server_id)
+            .ok_or_else(|| anyhow!("No MCP connection for '{server_id}'"))?;
         let result = self
             .runtime
-            .block_on(mcp::call_tool(connection, tool, arg_value))?;
+            .block_on(mcp::call_tool(connection, tool_name, arg_value))?;
         Ok(result)
     }
 
     fn show_mcp_status(&mut self) {
-        if let Some(connection) = &self.mcp_connection {
-            let tool_count = connection.tool_cache.len();
+        if !self.mcp_connections.is_empty() {
             self.log(
                 LogLevel::Info,
                 format!(
-                    "Connected MCP: {} ({} tools)",
-                    connection.server.display_name(),
-                    tool_count
+                    "Connected MCP servers: {}",
+                    self.mcp_connections.len()
                 ),
             );
+            let mut entries: Vec<(String, String, usize)> = self
+                .mcp_connections
+                .values()
+                .map(|conn| {
+                    (
+                        conn.server.display_name(),
+                        conn.server.id.clone(),
+                        conn.tool_cache.len(),
+                    )
+                })
+                .collect();
+            entries.sort_by(|a, b| a.1.cmp(&b.1));
+            for (name, id, tool_count) in entries {
+                self.log(
+                    LogLevel::Info,
+                    format!(
+                        "- {} ({}) [{} tools]",
+                        name,
+                        id,
+                        tool_count
+                    ),
+                );
+            }
+            if let Some(server) = &self.active_mcp {
+                self.log(
+                    LogLevel::Info,
+                    format!("Active MCP: {} ({})", server.display_name(), server.id),
+                );
+            }
         } else if let Some(server) = &self.active_mcp {
             self.log(
                 LogLevel::Info,
@@ -360,6 +615,30 @@ impl App {
         } else {
             self.log(LogLevel::Info, "No active MCP.".to_string());
         }
+    }
+}
+
+impl App {
+    fn resolve_tool_target<'a>(&self, tool: &'a str) -> Result<(String, &'a str)> {
+        if let Some((server_id, tool_name)) = mcp::split_namespaced_tool_name(tool) {
+            return Ok((server_id.to_string(), tool_name));
+        }
+
+        if let Some(active) = &self.active_mcp {
+            return Ok((active.id.clone(), tool));
+        }
+
+        if self.mcp_connections.len() == 1 {
+            if let Some((id, _)) = self.mcp_connections.iter().next() {
+                return Ok((id.clone(), tool));
+            }
+        }
+
+        Err(anyhow!(
+            "Ambiguous tool '{tool}'. Use <server_id>{}<{tool}> (e.g. notion{}search).",
+            mcp::MCP_TOOL_NAMESPACE_SEP,
+            mcp::MCP_TOOL_NAMESPACE_SEP
+        ))
     }
 }
 

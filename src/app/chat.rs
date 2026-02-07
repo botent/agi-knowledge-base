@@ -31,11 +31,11 @@ impl App {
             }
         };
 
-        if require_mcp && self.mcp_connection.is_none() {
+        if require_mcp && self.mcp_connections.is_empty() {
             log_src!(
                 self,
                 LogLevel::Warn,
-                "No active MCP connection.".to_string()
+                "No MCP connections.".to_string()
             );
             return;
         }
@@ -207,36 +207,55 @@ impl App {
 
     /// Build the OpenAI-compatible tool definitions from the active MCP connection.
     fn openai_tools_for_mcp(&mut self, require_mcp: bool) -> Result<Option<Vec<Value>>> {
-        if self.mcp_connection.is_none() {
+        if self.mcp_connections.is_empty() {
             if require_mcp {
                 return Err(anyhow!("No active MCP connection"));
             }
             return Ok(None);
         }
 
-        let cache_empty = self
-            .mcp_connection
-            .as_ref()
-            .map(|conn| conn.tool_cache.is_empty())
-            .unwrap_or(true);
-        if cache_empty {
-            self.list_mcp_tools();
+        let mut tool_warnings = Vec::new();
+        let server_ids: Vec<String> = self.mcp_connections.keys().cloned().collect();
+        for id in &server_ids {
+            let refresh_result = {
+                let Some(connection) = self.mcp_connections.get_mut(id) else {
+                    continue;
+                };
+                if connection.tool_cache.is_empty() {
+                    Some(self.runtime.block_on(mcp::refresh_tools(connection)))
+                } else {
+                    None
+                }
+            };
+            if let Some(Err(err)) = refresh_result {
+                tool_warnings.push(format!("MCP tools refresh failed for {id}: {err:#}"));
+            }
+        }
+        for line in tool_warnings {
+            log_src!(self, LogLevel::Warn, line);
         }
 
-        let tools = self
-            .mcp_connection
-            .as_ref()
-            .map(|conn| conn.tool_cache.clone())
-            .unwrap_or_default();
+        let mut openai_tools = Vec::new();
+        for id in server_ids {
+            let Some(connection) = self.mcp_connections.get(&id) else {
+                continue;
+            };
+            if connection.tool_cache.is_empty() {
+                continue;
+            }
+            openai_tools.extend(mcp::tools_to_openai_namespaced(
+                &connection.server,
+                &connection.tool_cache,
+            )?);
+        }
 
-        if tools.is_empty() {
+        if openai_tools.is_empty() {
             if require_mcp {
                 return Err(anyhow!("MCP connected but no tools available"));
             }
             return Ok(None);
         }
 
-        let openai_tools = mcp::tools_to_openai(&tools)?;
         Ok(Some(openai_tools))
     }
 

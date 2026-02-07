@@ -22,6 +22,8 @@ mod logging;
 mod store;
 mod ui;
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use chrono::Local;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
@@ -67,7 +69,7 @@ pub struct App {
     pub(crate) mcp_config: McpConfig,
     pub(crate) mcp_source: McpSource,
     pub(crate) active_mcp: Option<McpServer>,
-    pub(crate) mcp_connection: Option<McpConnection>,
+    pub(crate) mcp_connections: HashMap<String, McpConnection>,
     pub(crate) local_mcp_store: LocalMcpStore,
     pub(crate) rice: RiceStore,
     pub(crate) active_agent: Agent,
@@ -122,7 +124,7 @@ impl App {
             mcp_config,
             mcp_source,
             active_mcp: None,
-            mcp_connection: None,
+            mcp_connections: HashMap::new(),
             local_mcp_store,
             rice,
             active_agent: Agent::default(),
@@ -186,6 +188,9 @@ impl App {
                 format!("Active MCP load skipped: {err}")
             );
         }
+
+        // Auto-connect MCP servers we already have tokens for.
+        self.autoconnect_saved_mcps();
 
         // Restore custom agents.
         match self.runtime.block_on(self.rice.load_custom_agents()) {

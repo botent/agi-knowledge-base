@@ -15,6 +15,8 @@ use serde_json::{Value, json};
 use crate::mcp::config::McpServer;
 use crate::util::normalize_url;
 
+pub const MCP_TOOL_NAMESPACE_SEP: &str = "__";
+
 /// An active connection to a single MCP server.
 pub struct McpConnection {
     pub server: McpServer,
@@ -77,6 +79,7 @@ pub async fn call_tool(connection: &McpConnection, tool: &str, args: Value) -> R
 }
 
 /// Convert MCP tool definitions into the OpenAI function-calling schema.
+#[allow(dead_code)]
 pub fn tools_to_openai(tools: &[McpTool]) -> Result<Vec<Value>> {
     let mut openai_tools = Vec::new();
     for tool in tools {
@@ -86,6 +89,39 @@ pub fn tools_to_openai(tools: &[McpTool]) -> Result<Vec<Value>> {
             "type": "function",
             "name": tool.name,
             "description": tool.description.as_deref().unwrap_or(""),
+            "parameters": parameters
+        }));
+    }
+    Ok(openai_tools)
+}
+
+pub fn namespaced_tool_name(server_id: &str, tool_name: &str) -> String {
+    format!("{server_id}{MCP_TOOL_NAMESPACE_SEP}{tool_name}")
+}
+
+pub fn split_namespaced_tool_name(name: &str) -> Option<(&str, &str)> {
+    name.split_once(MCP_TOOL_NAMESPACE_SEP)
+}
+
+/// Convert MCP tool definitions into an OpenAI function-calling schema, namespaced
+/// by server id so multiple MCP servers can be used in one session.
+pub fn tools_to_openai_namespaced(server: &McpServer, tools: &[McpTool]) -> Result<Vec<Value>> {
+    let mut openai_tools = Vec::new();
+    for tool in tools {
+        let parameters =
+            serde_json::to_value(&tool.input_schema).context("serialize tool schema")?;
+        let tool_name = namespaced_tool_name(&server.id, tool.name.as_ref());
+        let server_label = server.display_name();
+        let base_description = tool.description.as_deref().unwrap_or("").trim();
+        let description = if base_description.is_empty() {
+            format!("[{server_label}]")
+        } else {
+            format!("[{server_label}] {base_description}")
+        };
+        openai_tools.push(json!({
+            "type": "function",
+            "name": tool_name,
+            "description": description,
             "parameters": parameters
         }));
     }

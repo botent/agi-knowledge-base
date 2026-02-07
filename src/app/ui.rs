@@ -420,9 +420,30 @@ impl App {
     // ── Status-bar helpers ───────────────────────────────────────────
 
     fn mcp_status_label(&self) -> String {
-        if let Some(connection) = &self.mcp_connection {
-            format!("{} (connected)", connection.server.display_name())
-        } else if let Some(server) = &self.active_mcp {
+        let connected = self.mcp_connections.len();
+        if connected > 0 {
+            if connected == 1 {
+                let name = self
+                    .mcp_connections
+                    .values()
+                    .next()
+                    .map(|conn| conn.server.display_name())
+                    .unwrap_or_else(|| "1 connected".to_string());
+                return format!("{name} (connected)");
+            }
+
+            if let Some(active) = self
+                .active_mcp
+                .as_ref()
+                .and_then(|server| self.mcp_connections.get(&server.id))
+            {
+                return format!("{} (+{})", active.server.display_name(), connected - 1);
+            }
+
+            return format!("{connected} connected");
+        }
+
+        if let Some(server) = &self.active_mcp {
             format!("{} (saved)", server.display_name())
         } else {
             "none".to_string()
@@ -430,7 +451,7 @@ impl App {
     }
 
     fn mcp_status_color(&self) -> Color {
-        if self.mcp_connection.is_some() {
+        if !self.mcp_connections.is_empty() {
             Color::Green
         } else if self.active_mcp.is_some() {
             Color::Yellow
