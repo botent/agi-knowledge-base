@@ -1,4 +1,4 @@
-# memini
+# Memini by AG\I
 
 A lightweight Rust TUI for connecting to MCP servers and persisting state with Rice.
 
@@ -13,7 +13,9 @@ A lightweight Rust TUI for connecting to MCP servers and persisting state with R
 ## Quick Start
 
 ```bash
-# From the repo root
+# Clone the repo
+git clone https://github.com/botent/agi-knowledge-base
+cd agi-knowledge-base
 cargo run
 ```
 
@@ -103,7 +105,7 @@ Connect to Notion:
 /mcp connect notion
 ```
 
-On startup, Memini auto-connects to every configured MCP server that already
+On startup, Memini by AG\I auto-connects to every configured MCP server that already
 has a stored token (set `MEMINI_MCP_AUTOCONNECT=0` to disable).
 
 When multiple MCP servers are connected, tools are namespaced as `id__tool`
@@ -149,16 +151,13 @@ export MEMINI_MEMORY_LIMIT=6
 
 Ephemeral TUI state (like logs and cursor position) is kept in memory only.
 
-## Homebrew Distribution (Template)
+## Homebrew Distribution
 
-For distributing via Homebrew, create a tap repo and add a formula based on
-`packaging/homebrew/memini.rb`. Replace the URL and SHA256 with your release
-artifacts, then:
+Install via Homebrew:
 
 ```bash
-brew tap <org>/<tap>
+brew tap botent/tap
 brew install memini
 ```
 
-If you want, I can wire up `cargo-dist` or a release workflow to auto-generate
-Homebrew formulae.
+See `packaging/homebrew/memini.rb` for the formula template.

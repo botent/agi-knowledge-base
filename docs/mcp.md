@@ -1,10 +1,10 @@
 # MCP Tool Integrations
 
-Memini connects to external tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). Out of the box, it ships with configs for Granola and Notion.
+Memini by AG\I connects to external tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). Out of the box, it ships with configs for Granola and Notion.
 
 ## Configuration
 
-MCP servers are defined in `mcp.json`. Memini looks for this file in order:
+MCP servers are defined in `mcp.json`. Memini by AG\I looks for this file in order:
 
 1. Path in `MEMINI_MCP_JSON` env var
 2. `./mcp.json` (project root)
@@ -62,7 +62,7 @@ If you already have a token:
 
 ### Auto-connect
 
-On startup, Memini automatically connects to every MCP server that already has a stored token. Disable with:
+On startup, Memini by AG\I automatically connects to every MCP server that already has a stored token. Disable with:
 
 ```bash
 export MEMINI_MCP_AUTOCONNECT=0

@@ -2,6 +2,9 @@
 name = "memini-cli-nondev"
 version = "0.1.0"
 edition = "2024"
+description = "Memini by AG\\I — an interactive TUI for AI chat with persistent memory"
+repository = "https://github.com/botent/agi-knowledge-base"
+license = "MIT"
 
 [dependencies]
 anyhow = "1.0"

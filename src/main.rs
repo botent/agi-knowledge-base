@@ -1,4 +1,4 @@
-//! Memini CLI — an interactive TUI for chatting with OpenAI through MCP
+//! Memini by AG\I — an interactive TUI for chatting with OpenAI through MCP
 //! servers, backed by Rice for persistent memory.
 //!
 //! This binary sets up a full-screen terminal UI, delegates to [`app::App`]

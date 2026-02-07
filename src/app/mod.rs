@@ -189,7 +189,7 @@ impl App {
         );
         app.log(
             LogLevel::Info,
-            "✨ Welcome to Memini — your AI with a memory.".to_string(),
+            "✨ Welcome to Memini by AG\\I — your AI with a memory.".to_string(),
         );
         app.log(
             LogLevel::Info,

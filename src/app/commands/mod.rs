@@ -67,9 +67,9 @@ impl App {
 impl App {
     fn show_help(&mut self) {
         let lines = [
-            "━━━  ◆ Memini — your AI with a memory  ━━━",
+            "━━━  ◆ Memini by AG\\I — your AI with a memory  ━━━",
             "",
-            "Just type to chat — Memini remembers everything via Rice.",
+            "Just type to chat — Memini by AG\\I remembers everything via Rice.",
             "",
             "Chat & Memory",
             "  (just type)             Talk to your AI — it recalls past chats",
@@ -122,7 +122,7 @@ impl App {
             "  /rice                   Show Rice memory connection status",
             "  /rice setup             Interactive Rice environment wizard",
             "  /clear                  Clear the screen",
-            "  /quit                   Exit Memini",
+            "  /quit                   Exit Memini by AG\\I",
         ];
         for line in lines {
             self.log(LogLevel::Info, line.to_string());

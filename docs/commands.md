@@ -8,7 +8,7 @@ All commands start with `/`. Anything without a `/` is sent as a chat message.
 | ----------------- | --------------------------------- |
 | `/help`           | Show the full command list in-app |
 | `/clear`          | Clear the activity log            |
-| `/quit` / `/exit` | Exit Memini                       |
+| `/quit` / `/exit` | Exit Memini by AG\I               |
 
 ## Chat & Memory
 

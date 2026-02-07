@@ -1,6 +1,6 @@
 # Rice Memory System
 
-Rice is the persistent memory backend that gives Memini its "I remember everything" superpower. It stores conversation threads, API keys, agent configurations, and semantic memory traces.
+Rice is the persistent memory backend that gives Memini by AG\I its "I remember everything" superpower. It stores conversation threads, API keys, agent configurations, and semantic memory traces.
 
 ## What Gets Stored in Rice
 
@@ -18,7 +18,7 @@ Rice is the persistent memory backend that gives Memini its "I remember everythi
 
 ### Interactive Setup (Recommended)
 
-From inside Memini:
+From inside Memini by AG\I:
 
 ```
 /rice setup
@@ -65,7 +65,7 @@ Every message you send is "focused" into Rice — creating a semantic embedding 
 
 ### Recall
 
-When you ask a question, Memini searches for relevant past interactions and includes them as context. This is controlled by:
+When you ask a question, Memini by AG\I searches for relevant past interactions and includes them as context. This is controlled by:
 
 ```bash
 export MEMINI_MEMORY_LIMIT=6   # number of traces to recall (default: 6)
@@ -98,7 +98,7 @@ The last workspace you joined is persisted and automatically restored on next la
 
 ## Run ID
 
-Each Memini instance uses a run ID to scope its data. Default is `memini`. Override with:
+Each Memini by AG\I instance uses a run ID to scope its data. Default is `memini`. Override with:
 
 ```bash
 export MEMINI_RUN_ID="my-project"

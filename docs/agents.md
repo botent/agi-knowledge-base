@@ -1,6 +1,6 @@
 # Agents & Personas
 
-Memini supports two kinds of agents: **personas** (how the AI talks to you) and **spawned agents** (independent workers in the grid).
+Memini by AG\I supports two kinds of agents: **personas** (how the AI talks to you) and **spawned agents** (independent workers in the grid).
 
 ## Personas
 
@@ -53,10 +53,10 @@ If an agent needs input (e.g. clarification), it will automatically open its ses
 
 ### How Agents Delegate
 
-When you chat with Memini and it has MCP tools connected, it **always** delegates work to spawned agents rather than calling tools directly. This means:
+When you chat with Memini by AG\I and it has MCP tools connected, it **always** delegates work to spawned agents rather than calling tools directly. This means:
 
 1. You ask a question
-2. Memini breaks it into sub-tasks
+2. Memini by AG\I breaks it into sub-tasks
 3. Each sub-task gets its own agent window
 4. Agents work in parallel in the grid
 5. Results are collected and synthesized

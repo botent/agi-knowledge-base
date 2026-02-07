@@ -102,7 +102,10 @@ impl App {
             let _ = spinner;
             (" ⟳ Thinking… ", Style::default().fg(Color::Yellow))
         } else {
-            (" ❯ memini ", Style::default().fg(Color::Rgb(0, 255, 136)))
+            (
+                " ❯ memini by ag\\i ",
+                Style::default().fg(Color::Rgb(0, 255, 136)),
+            )
         };
 
         let input_panel = Paragraph::new(self.input.as_str()).block(
@@ -501,9 +504,9 @@ impl App {
         let top_row = max_scroll.saturating_sub(self.scroll_offset as usize) as u16;
 
         let scroll_indicator = if self.scroll_offset > 0 {
-            format!(" ◆ memini [↑{}] ", self.scroll_offset)
+            format!(" ◆ memini by ag\\i [↑{}] ", self.scroll_offset)
         } else {
-            " ◆ memini ".to_string()
+            " ◆ memini by ag\\i ".to_string()
         };
 
         let panel = log_paragraph
