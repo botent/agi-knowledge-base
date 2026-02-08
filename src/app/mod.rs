@@ -85,6 +85,7 @@ pub struct App {
     pub(crate) rice: RiceStore,
     pub(crate) active_agent: Agent,
     pub(crate) custom_agents: Vec<Agent>,
+    pub(crate) imported_skills: Vec<crate::skills::LoadedSkill>,
     pub(crate) conversation_thread: Vec<serde_json::Value>,
     pub(crate) openai_key_hint: Option<String>,
     pub(crate) openai_key: Option<String>,
@@ -150,6 +151,7 @@ impl App {
             rice,
             active_agent: Agent::default(),
             custom_agents: Vec::new(),
+            imported_skills: Vec::new(),
             conversation_thread: Vec::new(),
             openai_key_hint: None,
             openai_key: None,
@@ -290,11 +292,37 @@ impl App {
             }
             _ => {}
         }
+
+        // Restore imported skills from local registry.
+        if let Err(err) = self.reload_imported_skills() {
+            log_src!(
+                self,
+                LogLevel::Warn,
+                format!("Imported skills load skipped: {err:#}")
+            );
+        } else if !self.imported_skills.is_empty() {
+            self.log(
+                LogLevel::Info,
+                format!(
+                    "Loaded {} imported skill(s) for agent execution.",
+                    self.imported_skills.len()
+                ),
+            );
+        }
     }
 
     /// Whether the user has requested to quit.
     pub fn should_quit(&self) -> bool {
         self.should_quit
+    }
+
+    pub(crate) fn reload_imported_skills(&mut self) -> Result<()> {
+        self.imported_skills = crate::skills::load_imported_skills()?;
+        Ok(())
+    }
+
+    pub(crate) fn skills_prompt_context(&self, query: &str) -> String {
+        crate::skills::build_prompt_context(&self.imported_skills, query)
     }
 }
 
@@ -709,6 +737,7 @@ impl App {
                     mcp_snapshots,
                     coordination_key,
                     persona,
+                    skill_context,
                 } => {
                     // Create the agent window on the main thread.
                     let window = AgentWindow {
@@ -737,6 +766,7 @@ impl App {
                             coordination_key,
                             persona,
                             prompt,
+                            skill_context,
                             mcp_snapshots,
                             tx,
                             openai,
@@ -749,6 +779,7 @@ impl App {
                             window_id,
                             persona,
                             prompt,
+                            skill_context,
                             tx,
                             openai,
                             key,
@@ -1016,11 +1047,13 @@ impl App {
         let key = self.openai_key.clone();
         let rice_handle = self.runtime.spawn(RiceStore::connect());
         let active_persona = self.active_agent.persona.clone();
+        let skill_context = self.skills_prompt_context(&prompt);
 
         daemon::spawn_agent_window(
             window_id,
             active_persona,
             prompt,
+            skill_context,
             tx,
             openai,
             key,

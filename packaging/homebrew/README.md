@@ -50,6 +50,9 @@ brew tap botent/tap
 brew install memini
 ```
 
+On install, the formula creates a local Memini home at `~/Memini`
+including `~/Memini/skills` for imported skill packs.
+
 ## Updating the Formula Version
 
 For each new release, the workflow outputs the updated SHA256 values. Update the formula in the tap repo:

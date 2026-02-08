@@ -72,6 +72,14 @@ All commands start with `/`. Anything without a `/` is sent as a chat message.
 | `/share join <name>` | Join a shared workspace       |
 | `/share leave`       | Return to private memory      |
 
+## Skills
+
+| Command                                  | Description                                        |
+| ---------------------------------------- | -------------------------------------------------- |
+| `/skills`                                | List imported skills                               |
+| `/skills import <skills.sh-url\|github>` | Import a skill for agentic workflows               |
+| `/skills reload`                         | Reload imported skills from disk/registry          |
+
 ## Settings
 
 | Command             | Description                         |

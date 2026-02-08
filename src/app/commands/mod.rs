@@ -10,12 +10,14 @@
 //! | `agents`  | `/agent`, `/thread`, `/memory`        |
 //! | `daemons` | `/daemon`, `/auto`, `/spawn`          |
 //! | `share`   | `/share`                              |
+//! | `skills`  | `/skills` — import/list skill packs   |
 
 mod agents;
 mod daemons;
 mod mcp;
 mod openai;
 mod share;
+mod skills;
 
 use super::App;
 use super::log_src;
@@ -43,6 +45,7 @@ impl App {
             "/daemon" | "/d" | "/auto" => self.handle_daemon_command(parts.collect()),
             "/spawn" => self.handle_spawn_command(parts.collect()),
             "/share" => self.handle_share_command(parts.collect()),
+            "/skills" => self.handle_skills_command(parts.collect()),
             "/panel" => {
                 self.show_side_panel = !self.show_side_panel;
                 let state = if self.show_side_panel {
@@ -114,6 +117,11 @@ impl App {
             "  /share                  Show current workspace status",
             "  /share join <name>      Join a shared workspace (team members use same name)",
             "  /share leave            Return to your private memory",
+            "",
+            "Skills (Agent Workflows)",
+            "  /skills                 List imported skills",
+            "  /skills import <url>    Import a skill from skills.sh or GitHub",
+            "  /skills reload          Reload imported skills from disk",
             "",
             "Settings",
             "  /openai                 Show AI key status",

@@ -17,6 +17,12 @@ class Memini < Formula
     bin.install "memini"
   end
 
+  def post_install
+    memini_home = File.join(Dir.home, "Memini")
+    mkdir_p memini_home
+    mkdir_p File.join(memini_home, "skills")
+  end
+
   test do
     assert_match "memini", shell_output("#{bin}/memini --help 2>&1", 1)
   end

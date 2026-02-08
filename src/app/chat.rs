@@ -41,6 +41,7 @@ impl App {
             message: message.to_string(),
             persona: self.active_agent.persona.clone(),
             agent_name: self.active_agent.name.clone(),
+            skill_context: self.skills_prompt_context(message),
             memory_limit: self.memory_limit,
             conversation_thread: self.conversation_thread.clone(),
             mcp_snapshots,

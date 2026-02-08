@@ -131,6 +131,8 @@ When multiple MCP servers are connected, tools are namespaced as `id__tool`
 - `/openai clear`
 - `/openai import-env`
 - `/rice`
+- `/skills`
+- `/skills import <skills.sh-url | github-url>`
 - `/clear`
 - `/quit`
 
@@ -147,6 +149,8 @@ Optional runtime config:
 ```bash
 export MEMINI_RUN_ID="memini"
 export MEMINI_MEMORY_LIMIT=6
+# Optional: override local Memini home (defaults to ~/Memini)
+export MEMINI_HOME="$HOME/Memini"
 ```
 
 Ephemeral TUI state (like logs and cursor position) is kept in memory only.

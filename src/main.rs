@@ -10,6 +10,7 @@ mod mcp;
 mod openai;
 mod prompts;
 mod rice;
+mod skills;
 mod util;
 
 use std::io;

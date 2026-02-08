@@ -67,6 +67,7 @@ pub enum AgentEvent {
         mcp_snapshots: Vec<McpServerSnapshot>,
         coordination_key: String,
         persona: String,
+        skill_context: String,
     },
 }
 
@@ -352,6 +353,7 @@ pub fn spawn_agent_window(
     window_id: usize,
     persona: String,
     prompt: String,
+    skill_context: String,
     tx: mpsc::UnboundedSender<AgentEvent>,
     openai: OpenAiClient,
     openai_key: Option<String>,
@@ -419,6 +421,9 @@ pub fn spawn_agent_window(
 
         let system_prompt = crate::prompts::worker_system_prompt(&persona, &now.to_string(), false);
         let mut input = vec![json!({"role": "system", "content": system_prompt})];
+        if !skill_context.trim().is_empty() {
+            input.push(json!({"role": "system", "content": skill_context.clone()}));
+        }
         if !memory_ctx.is_empty() {
             input.push(json!({"role": "system", "content": memory_ctx}));
         }
@@ -510,6 +515,7 @@ pub fn spawn_agent_window_with_mcp(
     coordination_key: String,
     persona: String,
     prompt: String,
+    skill_context: String,
     mcp_snapshots: Vec<McpServerSnapshot>,
     tx: mpsc::UnboundedSender<AgentEvent>,
     openai: OpenAiClient,
@@ -637,6 +643,9 @@ pub fn spawn_agent_window_with_mcp(
         let system_prompt =
             crate::prompts::worker_system_prompt(&persona, &now.to_string(), !all_tools.is_empty());
         let mut input = vec![json!({"role": "system", "content": system_prompt})];
+        if !skill_context.trim().is_empty() {
+            input.push(json!({"role": "system", "content": skill_context.clone()}));
+        }
         if !memory_ctx.is_empty() {
             input.push(json!({"role": "system", "content": memory_ctx}));
         }
@@ -806,6 +815,7 @@ pub struct ChatTaskParams {
     pub message: String,
     pub persona: String,
     pub agent_name: String,
+    pub skill_context: String,
     pub memory_limit: u64,
     pub conversation_thread: Vec<Value>,
     pub mcp_snapshots: Vec<McpServerSnapshot>,
@@ -830,6 +840,7 @@ pub fn spawn_chat_task(
             message,
             persona,
             agent_name,
+            skill_context,
             memory_limit,
             conversation_thread,
             mcp_snapshots,
@@ -943,6 +954,9 @@ pub fn spawn_chat_task(
         let sys = rice::system_prompt(&persona, !mcp_snapshots.is_empty());
         let mut input: Vec<Value> = Vec::new();
         input.push(json!({"role": "system", "content": sys}));
+        if !skill_context.trim().is_empty() {
+            input.push(json!({"role": "system", "content": skill_context.clone()}));
+        }
         if !memory_context.is_empty() {
             input.push(json!({"role": "system", "content": memory_context}));
         }
@@ -1006,7 +1020,14 @@ pub fn spawn_chat_task(
                 });
 
                 let tool_output = if call.name == "spawn_agent" {
-                    handle_spawn_agent_bg(call, &mcp_snapshots, &next_window_id, &tx, &persona)
+                    handle_spawn_agent_bg(
+                        call,
+                        &mcp_snapshots,
+                        &next_window_id,
+                        &tx,
+                        &persona,
+                        &skill_context,
+                    )
                 } else if call.name == "collect_results" {
                     handle_collect_results_bg(call, &mut rice).await
                 } else {
@@ -1105,6 +1126,7 @@ fn handle_spawn_agent_bg(
     next_window_id: &Arc<AtomicUsize>,
     tx: &mpsc::UnboundedSender<AgentEvent>,
     persona: &str,
+    skill_context: &str,
 ) -> String {
     let label = call
         .arguments
@@ -1157,6 +1179,7 @@ fn handle_spawn_agent_bg(
         mcp_snapshots: filtered,
         coordination_key: coordination_key.clone(),
         persona: persona.to_string(),
+        skill_context: skill_context.to_string(),
     });
 
     let _ = tx.send(AgentEvent::ChatProgress {

@@ -319,11 +319,13 @@ impl App {
         let key = self.openai_key.clone();
         let rice_handle = self.runtime.spawn(crate::rice::RiceStore::connect());
         let persona = self.active_agent.persona.clone();
+        let skill_context = self.skills_prompt_context(prompt);
 
         daemon::spawn_agent_window(
             window_id,
             persona,
             prompt.to_string(),
+            skill_context,
             tx,
             openai,
             key,
