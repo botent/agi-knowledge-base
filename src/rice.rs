@@ -386,43 +386,10 @@ pub fn format_memories(traces: &[Trace]) -> String {
 }
 
 pub fn system_prompt(persona: &str, require_mcp: bool) -> String {
-    let now = chrono::Local::now().format("%A, %B %e, %Y at %H:%M");
-    let agent_instructions = "\
-        CRITICAL RULE — AGENT SPAWNING IS MANDATORY: \
-        You MUST use the `spawn_agent` tool to delegate work. \
-        Do NOT call MCP tools (e.g. granola__*, notion__*, etc.) directly yourself. \
-        Instead, spawn a sub-agent for each task and let the agent call the MCP tools. \
-        Each spawned agent runs independently in its own window with its own MCP connection \
-        and full tool loop. The user can see all agents working in a grid layout. \
-        \
-        WORKFLOW: \
-        1. Analyze the user's request and break it into sub-tasks. \
-        2. Call `spawn_agent` once per sub-task. Give each agent a clear prompt telling it \
-           exactly what MCP tools to call and what to return. Use `mcp_server` to route each \
-           agent to the right server. Use a shared `coordination_key` for the group. \
-        3. Call `collect_results` with the coordination_key to gather outputs. \
-        4. Synthesize a unified answer from the collected results. \
-        \
-        EXAMPLES: \
-        - User says 'summarize my last 6 meetings' → spawn 1 agent to list meetings, wait for \
-          result, then spawn 6 agents (one per meeting) to fetch and summarize each transcript. \
-        - User says 'find X in Notion and Granola' → spawn 2 agents, one per MCP server. \
-        \
-        NEVER call MCP tools directly. ALWAYS delegate via spawn_agent. This is non-negotiable.";
-
-    if require_mcp {
-        format!(
-            "{persona} The current date and time is {now}. \
-             Use available tools when needed to answer the user's request. Summarize results clearly. \
-             {agent_instructions}"
-        )
-    } else {
-        format!(
-            "{persona} The current date and time is {now}. \
-             Use any provided memory context when helpful and answer clearly. \
-             {agent_instructions}"
-        )
-    }
+    let now = chrono::Local::now()
+        .format("%A, %B %e, %Y at %H:%M")
+        .to_string();
+    crate::prompts::main_chat_system_prompt(persona, &now, require_mcp)
 }
 
 pub fn agent_id_for(agent_name: &str) -> String {

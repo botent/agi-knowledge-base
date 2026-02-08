@@ -8,6 +8,7 @@ mod app;
 mod constants;
 mod mcp;
 mod openai;
+mod prompts;
 mod rice;
 mod util;
 

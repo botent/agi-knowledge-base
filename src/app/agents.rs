@@ -23,10 +23,7 @@ impl Default for Agent {
         Self {
             name: "memini".to_string(),
             description: "Your personal CLI assistant with long-term memory".to_string(),
-            persona: "You are Memini, a concise CLI assistant with long-term memory. \
-                      You remember past conversations and use context to give personalized, \
-                      helpful answers. Be concise but thorough."
-                .to_string(),
+            persona: crate::prompts::default_memini_persona().to_string(),
         }
     }
 }

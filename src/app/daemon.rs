@@ -417,11 +417,8 @@ pub fn spawn_agent_window(
             line: "Thinking...".to_string(),
         });
 
-        let mut input = vec![json!({"role": "system", "content": format!(
-            "{persona} The current date and time is {now}. \
-             If you need more information from the user to complete the task, \
-             end your response with exactly: [NEEDS_INPUT] followed by your question."
-        )})];
+        let system_prompt = crate::prompts::worker_system_prompt(&persona, &now.to_string(), false);
+        let mut input = vec![json!({"role": "system", "content": system_prompt})];
         if !memory_ctx.is_empty() {
             input.push(json!({"role": "system", "content": memory_ctx}));
         }
@@ -637,13 +634,9 @@ pub fn spawn_agent_window_with_mcp(
             line: "Thinking...".to_string(),
         });
 
-        let mut input = vec![json!({"role": "system", "content": format!(
-            "{persona} The current date and time is {now}. \
-             Use available tools when needed to answer the user's request. \
-             Be thorough and summarize results clearly. \
-             If you need more information from the user to complete the task, \
-             end your response with exactly: [NEEDS_INPUT] followed by your question."
-        )})];
+        let system_prompt =
+            crate::prompts::worker_system_prompt(&persona, &now.to_string(), !all_tools.is_empty());
+        let mut input = vec![json!({"role": "system", "content": system_prompt})];
         if !memory_ctx.is_empty() {
             input.push(json!({"role": "system", "content": memory_ctx}));
         }

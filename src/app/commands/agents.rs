@@ -141,11 +141,7 @@ impl App {
             return;
         }
 
-        let persona = format!(
-            "You are {name}, a specialized AI assistant. {description} \
-             You have access to long-term memory and remember past conversations. \
-             Be concise but thorough."
-        );
+        let persona = crate::prompts::custom_persona(name, description);
         let agent = Agent {
             name: name.to_string(),
             description: description.to_string(),
