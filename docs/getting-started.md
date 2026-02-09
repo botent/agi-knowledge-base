@@ -96,6 +96,13 @@ Optional model setup:
 /model thinking medium
 ```
 
+Optional background auto-agent setup:
+
+```
+/auto templates
+/auto scaffold repo-watch
+```
+
 ## Your First Chat
 
 Just type anything and press Enter — no slash prefix needed:
@@ -110,5 +117,6 @@ Memini by AG\I will use your OpenAI key to respond, and if Rice is connected, it
 
 - Read [commands.md](commands.md) for a full command reference
 - Read [agents.md](agents.md) to learn about personas and multi-agent workflows
+- Read [auto-agents.md](auto-agents.md) for file-backed background agents
 - Read [mcp.md](mcp.md) to connect external tools (Notion, Granola, etc.)
 - Read [rice.md](rice.md) for more on Rice memory and shared workspaces

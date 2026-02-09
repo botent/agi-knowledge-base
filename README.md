@@ -135,6 +135,17 @@ When multiple MCP servers are connected, tools are namespaced as `id__tool`
 - `/key <key>`
 - `/openai clear`
 - `/openai import-env`
+- `/auto`
+- `/auto create <name> <seconds> <instructions>`
+- `/auto templates`
+- `/auto scaffold <template> [name]`
+- `/auto dir`
+- `/auto reload`
+- `/auto start <name>`
+- `/auto stop <name>`
+- `/auto run <name>`
+- `/auto remove <name>`
+- `/auto results [name]`
 - `/rice`
 - `/skills`
 - `/skills import <skills.sh-url | github-url>`
@@ -153,6 +164,31 @@ Override order at runtime:
 1. `$MEMINI_PROMPTS_DIR/*.md` (if set)
 2. `$MEMINI_HOME/prompts/*.md` (defaults to `~/Memini/prompts`)
 3. bundled repo defaults in `./prompts/*.md`
+
+## Auto-Agent Recipes
+
+File-backed background agents live in `$MEMINI_HOME/agents` (defaults to `~/Memini/agents`).
+Use `/auto dir` to show the exact path, then add `.md` files with front matter.
+
+Example recipe:
+
+```md
+---
+name: repo-watch
+description: keep an eye on repo health
+interval_secs: 1800
+auto_start: true
+tools: workspace_list_files,workspace_read_file,workspace_run_command
+persona: You are a repository watchdog agent.
+---
+Inspect the repository, run fast verification checks, and summarize failures, risky changes, and next actions.
+```
+
+You can also create recipes directly from CLI:
+
+- `/auto create my-watcher 900 Inspect the codebase and report breakages.`
+- `/auto templates`
+- `/auto scaffold repo-watch`
 
 ## Persistence Notes
 

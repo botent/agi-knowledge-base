@@ -13,6 +13,7 @@
 //! | `store`      | Local on-disk MCP credential cache        |
 //! | `ui`         | TUI rendering & status-bar helpers        |
 
+mod agent_recipes;
 mod agents;
 mod chat;
 mod commands;
@@ -319,6 +320,9 @@ impl App {
                 ),
             );
         }
+
+        // Auto-start recipe-based background agents marked `auto_start: true`.
+        self.autostart_daemon_recipes();
     }
 
     /// Whether the user has requested to quit.

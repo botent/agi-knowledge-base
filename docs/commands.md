@@ -46,15 +46,20 @@ All commands start with `/`. Anything without a `/` is sent as a chat message.
 
 ## Autopilot (Background Tasks)
 
-| Command                               | Description                     |
-| ------------------------------------- | ------------------------------- |
-| `/auto`                               | List available background tasks |
-| `/auto run <name>`                    | Run a task immediately          |
-| `/auto start <name>`                  | Start a recurring task          |
-| `/auto stop <name>`                   | Stop a running task             |
-| `/auto add <name> <seconds> <prompt>` | Create a custom recurring task  |
-| `/auto remove <name>`                 | Remove a task                   |
-| `/auto results [name]`                | View recent task outputs        |
+| Command                                       | Description                                          |
+| --------------------------------------------- | ---------------------------------------------------- |
+| `/auto`                                       | List available background tasks                      |
+| `/auto run <name>`                            | Run a task immediately                               |
+| `/auto start <name>`                          | Start a recurring task                               |
+| `/auto stop <name>`                           | Stop a running task                                  |
+| `/auto create <name> <seconds> <instructions>`| Create+start a file-backed task recipe              |
+| `/auto add <name> <seconds> <instructions>`   | Alias for `/auto create`                             |
+| `/auto templates`                             | List built-in recipe templates                       |
+| `/auto scaffold <template> [name]`            | Create+start a recipe from a template                |
+| `/auto dir`                                   | Show `$MEMINI_HOME/agents` recipe directory          |
+| `/auto reload`                                | Reload recipe files from disk                        |
+| `/auto remove <name>`                         | Remove a task (and recipe file if file-backed)       |
+| `/auto results [name]`                        | View recent task outputs                             |
 
 ## Integrations (MCP)
 

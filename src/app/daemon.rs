@@ -8,6 +8,7 @@
 //! Agent windows track real-time status (thinking/done/waiting) and stream
 //! output line-by-line so the user can watch the reasoning unfold.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -117,6 +118,8 @@ pub struct DaemonTaskDef {
     pub persona: String,
     pub prompt: String,
     pub interval_secs: u64,
+    #[serde(default)]
+    pub tools: Vec<String>,
     pub paused: bool,
 }
 
@@ -139,13 +142,15 @@ pub fn builtin_tasks() -> Vec<DaemonTaskDef> {
             persona: crate::prompts::daemon_briefing_persona(),
             prompt: crate::prompts::daemon_briefing_prompt(),
             interval_secs: 3600, // every hour
-            paused: true,        // off by default, user enables
+            tools: vec!["local".to_string()],
+            paused: true, // off by default, user enables
         },
         DaemonTaskDef {
             name: "digest".to_string(),
             persona: crate::prompts::daemon_digest_persona(),
             prompt: crate::prompts::daemon_digest_prompt(),
             interval_secs: 7200, // every 2 hours
+            tools: vec!["local".to_string()],
             paused: true,
         },
     ]
@@ -198,38 +203,7 @@ pub fn spawn_task(
                 continue;
             };
 
-            // Recall memories for the prompt.
-            let memories = match rice.reminisce(vec![], 6, &def_clone.prompt).await {
-                Ok(traces) => traces,
-                Err(_) => Vec::new(),
-            };
-
-            let memory_ctx = crate::rice::format_memories(&memories);
-            let now = Local::now().format("%A, %B %e, %Y at %H:%M");
-
-            let mut input = vec![json!({"role": "system", "content": format!(
-                "{} The current date and time is {now}.",
-                def_clone.persona
-            )})];
-            if !memory_ctx.is_empty() {
-                input.push(json!({"role": "system", "content": memory_ctx}));
-            }
-            input.push(json!({"role": "user", "content": def_clone.prompt}));
-
-            let result = openai.response(key, &input, None).await;
-
-            let output_text = match result {
-                Ok(response) => {
-                    let items = crate::openai::extract_output_items(&response);
-                    let text = crate::openai::extract_output_text(&items);
-                    if text.is_empty() {
-                        "(no output)".to_string()
-                    } else {
-                        text
-                    }
-                }
-                Err(err) => format!("Error: {err:#}"),
-            };
+            let output_text = run_daemon_task_once(&def_clone, &openai, key, &mut rice).await;
 
             // Commit to Rice memory.
             let _ = rice
@@ -283,37 +257,7 @@ pub fn spawn_oneshot(
             return;
         };
 
-        let memories = match rice.reminisce(vec![], 6, &def_clone.prompt).await {
-            Ok(traces) => traces,
-            Err(_) => Vec::new(),
-        };
-
-        let memory_ctx = crate::rice::format_memories(&memories);
-        let now = Local::now().format("%A, %B %e, %Y at %H:%M");
-
-        let mut input = vec![json!({"role": "system", "content": format!(
-            "{} The current date and time is {now}.",
-            def_clone.persona
-        )})];
-        if !memory_ctx.is_empty() {
-            input.push(json!({"role": "system", "content": memory_ctx}));
-        }
-        input.push(json!({"role": "user", "content": def_clone.prompt}));
-
-        let result = openai.response(key, &input, None).await;
-
-        let output_text = match result {
-            Ok(response) => {
-                let items = crate::openai::extract_output_items(&response);
-                let text = crate::openai::extract_output_text(&items);
-                if text.is_empty() {
-                    "(no output)".to_string()
-                } else {
-                    text
-                }
-            }
-            Err(err) => format!("Error: {err:#}"),
-        };
+        let output_text = run_daemon_task_once(&def_clone, &openai, key, &mut rice).await;
 
         let _ = rice
             .commit_trace(
@@ -331,6 +275,127 @@ pub fn spawn_oneshot(
             timestamp: Local::now().format("%H:%M:%S").to_string(),
         });
     });
+}
+
+fn normalize_tool_selector(raw: &str) -> String {
+    raw.trim().to_ascii_lowercase()
+}
+
+fn selected_local_tools(tool_selectors: &[String]) -> Vec<Value> {
+    let all_tools = crate::local_tools::tool_defs();
+    if tool_selectors.is_empty() {
+        return all_tools;
+    }
+
+    let wanted: HashSet<String> = tool_selectors
+        .iter()
+        .map(|selector| normalize_tool_selector(selector))
+        .collect();
+    if wanted.contains("none") {
+        return Vec::new();
+    }
+    if wanted.contains("local")
+        || wanted.contains("all")
+        || wanted.contains("*")
+        || wanted.contains("workspace")
+    {
+        return all_tools;
+    }
+
+    all_tools
+        .into_iter()
+        .filter(|tool| {
+            let Some(name) = tool.get("name").and_then(|value| value.as_str()) else {
+                return false;
+            };
+            wanted.contains(&normalize_tool_selector(name))
+        })
+        .collect()
+}
+
+async fn run_daemon_task_once(
+    def: &DaemonTaskDef,
+    openai: &OpenAiClient,
+    key: &str,
+    rice: &mut RiceStore,
+) -> String {
+    let memories = match rice.reminisce(vec![], 6, &def.prompt).await {
+        Ok(traces) => traces,
+        Err(_) => Vec::new(),
+    };
+
+    let memory_ctx = crate::rice::format_memories(&memories);
+    let now = Local::now().format("%A, %B %e, %Y at %H:%M");
+    let all_tools = selected_local_tools(&def.tools);
+
+    let system_prompt =
+        crate::prompts::worker_system_prompt(&def.persona, &now.to_string(), !all_tools.is_empty());
+    let mut input = vec![json!({"role": "system", "content": system_prompt})];
+    if !memory_ctx.is_empty() {
+        input.push(json!({"role": "system", "content": memory_ctx}));
+    }
+    input.push(json!({"role": "user", "content": def.prompt.clone()}));
+
+    let tools_opt: Option<&[Value]> = if all_tools.is_empty() {
+        None
+    } else {
+        Some(&all_tools)
+    };
+
+    let mut response = match openai.response(key, &input, tools_opt).await {
+        Ok(value) => value,
+        Err(err) => return format!("Error: {err:#}"),
+    };
+
+    let mut output_items = openai::extract_output_items(&response);
+    if !output_items.is_empty() {
+        input.extend(output_items.clone());
+    }
+    let mut output_text = openai::extract_output_text(&output_items);
+    let mut tool_calls = openai::extract_tool_calls(&output_items);
+    let mut tool_loops = 0usize;
+
+    while !tool_calls.is_empty() {
+        if openai::tool_loop_limit_reached(tool_loops) {
+            break;
+        }
+        tool_loops += 1;
+
+        for call in &tool_calls {
+            let tool_output = if let Some(output) = crate::local_tools::handle_tool_call(call).await
+            {
+                output
+            } else {
+                format!(
+                    r#"{{"error":"Unknown or disallowed tool '{}'"}}"#,
+                    call.name
+                )
+            };
+
+            input.push(json!({
+                "type": "function_call_output",
+                "call_id": call.call_id,
+                "output": tool_output
+            }));
+        }
+
+        response = match openai.response(key, &input, tools_opt).await {
+            Ok(value) => value,
+            Err(err) => return format!("Error: {err:#}"),
+        };
+        output_items = openai::extract_output_items(&response);
+        if !output_items.is_empty() {
+            input.extend(output_items.clone());
+        }
+        output_text = openai::extract_output_text(&output_items);
+        tool_calls = openai::extract_tool_calls(&output_items);
+    }
+
+    if output_text.trim().is_empty() {
+        "(no output)".to_string()
+    } else {
+        output_text
+    }
 }
 
 // ── Spawn an agent window (streaming, interactive) ───────────────────
