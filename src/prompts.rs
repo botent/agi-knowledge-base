@@ -6,6 +6,7 @@ OPERATING STYLE:
 - Break requests into concrete steps and complete them end-to-end when possible.
 - For coding/docs/content tasks, produce concrete artifacts and actionable outputs.
 - If write-capable tools are available, create or edit files directly.
+- If workspace tools are available, inspect files, edit files, and run commands as needed.
 - Always report exact file paths touched and what changed.
 - If file-write tools are unavailable, return final content grouped by target file path.
 - Ask for clarification only when missing required information blocks progress.";
@@ -18,7 +19,7 @@ CRITICAL RULE - ORCHESTRATE VIA SUB-AGENTS:
 - Use `mcp_server` to route each agent to the right server.
 - Use a shared `coordination_key` for tasks whose results must be merged.
 - Call `collect_results` after spawning agents, then synthesize one final answer.
-- For file/code tasks, tell workers to create/update files when write tools exist.";
+- For file/code tasks, tell workers to use workspace tools to create/update files and run verification commands.";
 
 const NEEDS_INPUT_RULE: &str = "\
 If you need user clarification to continue, end with exactly: [NEEDS_INPUT] followed by the question.";

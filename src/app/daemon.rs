@@ -413,13 +413,15 @@ pub fn spawn_agent_window(
         let memory_ctx = crate::rice::format_memories(&memories);
         let now = Local::now().format("%A, %B %e, %Y at %H:%M");
 
-        // -- Step 2: Build prompt and call LLM
+        // -- Step 2: Build prompt and run tool loop
         let _ = tx.send(AgentEvent::Progress {
             window_id,
             line: "Thinking...".to_string(),
         });
 
-        let system_prompt = crate::prompts::worker_system_prompt(&persona, &now.to_string(), false);
+        let all_tools = crate::local_tools::tool_defs();
+        let system_prompt =
+            crate::prompts::worker_system_prompt(&persona, &now.to_string(), !all_tools.is_empty());
         let mut input = vec![json!({"role": "system", "content": system_prompt})];
         if !skill_context.trim().is_empty() {
             input.push(json!({"role": "system", "content": skill_context.clone()}));
@@ -429,20 +431,89 @@ pub fn spawn_agent_window(
         }
         input.push(json!({"role": "user", "content": prompt.clone()}));
 
-        let result = openai.response(key, &input, None).await;
-
-        let output_text = match result {
-            Ok(response) => {
-                let items = crate::openai::extract_output_items(&response);
-                let text = crate::openai::extract_output_text(&items);
-                if text.is_empty() {
-                    "(no output)".to_string()
-                } else {
-                    text
-                }
-            }
-            Err(err) => format!("Error: {err:#}"),
+        let tools_opt: Option<&[Value]> = if all_tools.is_empty() {
+            None
+        } else {
+            Some(&all_tools)
         };
+
+        let mut response = match openai.response(key, &input, tools_opt).await {
+            Ok(r) => r,
+            Err(err) => {
+                let msg = format!("Error: {err:#}");
+                let _ = tx.send(AgentEvent::Progress {
+                    window_id,
+                    line: msg.clone(),
+                });
+                let _ = tx.send(AgentEvent::Finished {
+                    window_id,
+                    message: msg,
+                    timestamp: Local::now().format("%H:%M:%S").to_string(),
+                });
+                return;
+            }
+        };
+
+        let mut output_items = openai::extract_output_items(&response);
+        if !output_items.is_empty() {
+            input.extend(output_items.clone());
+        }
+        let mut output_text = openai::extract_output_text(&output_items);
+        let mut tool_calls = openai::extract_tool_calls(&output_items);
+        let mut tool_loops = 0usize;
+
+        while !tool_calls.is_empty() {
+            if openai::tool_loop_limit_reached(tool_loops) {
+                let _ = tx.send(AgentEvent::Progress {
+                    window_id,
+                    line: "Tool loop limit reached.".to_string(),
+                });
+                break;
+            }
+            tool_loops += 1;
+
+            for call in &tool_calls {
+                let _ = tx.send(AgentEvent::Progress {
+                    window_id,
+                    line: format!("Calling tool: {}", call.name),
+                });
+
+                let tool_output =
+                    if let Some(output) = crate::local_tools::handle_tool_call(call).await {
+                        output
+                    } else {
+                        format!(r#"{{"error":"Unknown tool '{}'"}}"#, call.name)
+                    };
+
+                let _ = tx.send(AgentEvent::Progress {
+                    window_id,
+                    line: format!("Tool {} returned.", call.name),
+                });
+
+                input.push(json!({
+                    "type": "function_call_output",
+                    "call_id": call.call_id,
+                    "output": tool_output
+                }));
+            }
+
+            response = match openai.response(key, &input, tools_opt).await {
+                Ok(r) => r,
+                Err(err) => {
+                    let _ = tx.send(AgentEvent::Progress {
+                        window_id,
+                        line: format!("LLM error: {err:#}"),
+                    });
+                    break;
+                }
+            };
+            output_items = openai::extract_output_items(&response);
+            if !output_items.is_empty() {
+                input.extend(output_items.clone());
+            }
+            output_text = openai::extract_output_text(&output_items);
+            tool_calls = openai::extract_tool_calls(&output_items);
+        }
 
         // -- Step 3: Stream output line by line
         for line in output_text.lines() {
@@ -612,6 +683,7 @@ pub fn spawn_agent_window_with_mcp(
                 }
             }
         }
+        all_tools.extend(crate::local_tools::tool_defs());
 
         // -- Step 2: Recall memories
         let _ = tx.send(AgentEvent::Progress {
@@ -698,23 +770,24 @@ pub fn spawn_agent_window_with_mcp(
                     line: format!("Calling tool: {}", call.name),
                 });
 
-                // Find the right MCP connection for this namespaced tool.
-                let tool_output = if let Some((server_id, tool_name)) =
-                    mcp::split_namespaced_tool_name(&call.name)
-                {
-                    if let Some(conn) = connections.iter().find(|c| c.server.id == server_id) {
-                        match mcp::call_tool(conn, tool_name, call.arguments.clone()).await {
-                            Ok(value) => {
-                                serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string())
+                let tool_output =
+                    if let Some(output) = crate::local_tools::handle_tool_call(call).await {
+                        output
+                    } else if let Some((server_id, tool_name)) =
+                        mcp::split_namespaced_tool_name(&call.name)
+                    {
+                        if let Some(conn) = connections.iter().find(|c| c.server.id == server_id) {
+                            match mcp::call_tool(conn, tool_name, call.arguments.clone()).await {
+                                Ok(value) => serde_json::to_string(&value)
+                                    .unwrap_or_else(|_| "{}".to_string()),
+                                Err(err) => format!(r#"{{"error":"{err}"}}"#),
                             }
-                            Err(err) => format!(r#"{{"error":"{err}"}}"#),
+                        } else {
+                            format!(r#"{{"error":"No MCP connection for server '{server_id}'"}}"#)
                         }
                     } else {
-                        format!(r#"{{"error":"No MCP connection for server '{server_id}'"}}"#)
-                    }
-                } else {
-                    format!(r#"{{"error":"Unresolvable tool '{}'"}}"#, call.name)
-                };
+                        format!(r#"{{"error":"Unresolvable tool '{}'"}}"#, call.name)
+                    };
 
                 let _ = tx.send(AgentEvent::Progress {
                     window_id,

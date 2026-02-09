@@ -63,7 +63,7 @@ impl App {
         let spawn_tool = json!({
             "type": "function",
             "name": "spawn_agent",
-            "description": "Spawn an independent execution agent in its own grid window. Each agent gets its own MCP connection, memory context, and full tool loop. Use this to run sub-tasks in parallel. For code or document tasks, instruct the worker to produce concrete artifacts and create/update files when write tools are available. Pass a coordination_key so you can later collect results with collect_results.",
+            "description": "Spawn an independent execution agent in its own grid window. Each agent gets its own memory context, workspace tools (file read/write + shell command), and full tool loop; MCP tools are added when available. Use this to run sub-tasks in parallel. For code/document tasks, instruct the worker to create or edit files directly and run commands for verification. Pass a coordination_key so you can later collect results with collect_results.",
             "parameters": {
                 "type": "object",
                 "properties": {

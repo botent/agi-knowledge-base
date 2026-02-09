@@ -6,6 +6,7 @@
 
 mod app;
 mod constants;
+mod local_tools;
 mod mcp;
 mod openai;
 mod prompts;
