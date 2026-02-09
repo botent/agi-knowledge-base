@@ -8,6 +8,10 @@ pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Rice variable key for the persisted OpenAI API key.
 pub const OPENAI_KEY_VAR: &str = "openai_api_key";
+/// Rice variable key for the selected OpenAI model.
+pub const OPENAI_MODEL_VAR: &str = "openai_model";
+/// Rice variable key for reasoning effort (`low|medium|high`).
+pub const OPENAI_REASONING_EFFORT_VAR: &str = "openai_reasoning_effort";
 /// Rice variable key for the last-used MCP server.
 pub const ACTIVE_MCP_VAR: &str = "active_mcp";
 

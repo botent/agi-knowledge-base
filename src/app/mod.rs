@@ -218,6 +218,13 @@ impl App {
                 format!("OpenAI key load skipped: {err}")
             );
         }
+        if let Err(err) = self.load_openai_model_settings_from_rice() {
+            log_src!(
+                self,
+                LogLevel::Warn,
+                format!("OpenAI model settings load skipped: {err}")
+            );
+        }
         if let Err(err) = self.load_active_mcp_from_rice() {
             log_src!(
                 self,

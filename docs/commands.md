@@ -90,6 +90,10 @@ All commands start with `/`. Anything without a `/` is sent as a chat message.
 | ------------------- | ----------------------------------- |
 | `/openai`           | Show AI key status                  |
 | `/openai set <key>` | Save your OpenAI key                |
+| `/model`            | Show current model + thinking mode  |
+| `/model list`       | Show model-picking guidance         |
+| `/model set <name>` | Change active model                 |
+| `/model thinking <mode>` | Set thinking (`on/off/low/medium/high`) |
 | `/key <key>`        | Quick-set OpenAI key                |
 | `/rice`             | Show Rice connection status         |
 | `/rice setup`       | Interactive Rice environment wizard |

@@ -89,6 +89,13 @@ If `OPENAI_API_KEY` is in your environment, import it:
 
 The key is persisted in Rice so you only need to set it once.
 
+Optional model setup:
+
+```
+/model set gpt-5-mini
+/model thinking medium
+```
+
 ## Your First Chat
 
 Just type anything and press Enter — no slash prefix needed:

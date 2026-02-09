@@ -136,25 +136,15 @@ pub fn builtin_tasks() -> Vec<DaemonTaskDef> {
     vec![
         DaemonTaskDef {
             name: "briefing".to_string(),
-            persona: "You are a concise daily briefing agent. Summarize what the user \
-                      worked on recently based on memory context. Highlight anything \
-                      that looks unfinished or time-sensitive."
-                .to_string(),
-            prompt: "Give me a quick briefing on what I've been working on and anything \
-                     I should follow up on today."
-                .to_string(),
+            persona: crate::prompts::daemon_briefing_persona(),
+            prompt: crate::prompts::daemon_briefing_prompt(),
             interval_secs: 3600, // every hour
             paused: true,        // off by default, user enables
         },
         DaemonTaskDef {
             name: "digest".to_string(),
-            persona: "You are a memory digest agent. Look through the user's recent \
-                      memories and create a short organized summary grouping related \
-                      topics together."
-                .to_string(),
-            prompt: "Summarize my recent activity into a short organized digest. \
-                     Group related items together."
-                .to_string(),
+            persona: crate::prompts::daemon_digest_persona(),
+            prompt: crate::prompts::daemon_digest_prompt(),
             interval_secs: 7200, // every 2 hours
             paused: true,
         },

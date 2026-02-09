@@ -56,6 +56,7 @@ Optional OpenAI config:
 export OPENAI_MODEL="gpt-4o-mini"
 export OPENAI_EMBED_MODEL="text-embedding-3-small"
 export OPENAI_BASE_URL="https://api.openai.com/v1"
+export OPENAI_REASONING_EFFORT="medium" # low | medium | high
 ```
 
 ## MCP Configuration
@@ -127,6 +128,10 @@ When multiple MCP servers are connected, tools are namespaced as `id__tool`
 - `/mcp token-clear <id>`
 - `/openai`
 - `/openai set <key>`
+- `/model`
+- `/model list`
+- `/model set <name>`
+- `/model thinking <on|off|low|medium|high>`
 - `/key <key>`
 - `/openai clear`
 - `/openai import-env`
@@ -139,11 +144,23 @@ When multiple MCP servers are connected, tools are namespaced as `id__tool`
 - `/clear`
 - `/quit`
 
+## Prompt Templates
+
+System/agent prompt text now lives in Markdown files under `./prompts/`.
+
+Override order at runtime:
+
+1. `$MEMINI_PROMPTS_DIR/*.md` (if set)
+2. `$MEMINI_HOME/prompts/*.md` (defaults to `~/Memini/prompts`)
+3. bundled repo defaults in `./prompts/*.md`
+
 ## Persistence Notes
 
 The following are persisted in Rice State:
 
 - `openai_api_key`
+- `openai_model`
+- `openai_reasoning_effort`
 - `active_mcp`
 - `mcp_token_<id>`
 
@@ -154,6 +171,8 @@ export MEMINI_RUN_ID="memini"
 export MEMINI_MEMORY_LIMIT=6
 # Optional: override local Memini home (defaults to ~/Memini)
 export MEMINI_HOME="$HOME/Memini"
+# Optional: override prompt templates directory
+export MEMINI_PROMPTS_DIR="$HOME/Memini/prompts"
 ```
 
 Ephemeral TUI state (like logs and cursor position) is kept in memory only.

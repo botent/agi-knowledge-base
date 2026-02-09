@@ -20,6 +20,7 @@ pub struct ToolCall {
 #[derive(Clone)]
 pub struct OpenAiClient {
     pub model: String,
+    pub reasoning_effort: Option<String>,
     pub base_url: String,
     http_client: HttpClient,
 }
@@ -28,10 +29,19 @@ impl OpenAiClient {
     pub fn new() -> Self {
         let model = env_first(&["OPENAI_MODEL", "MEMINI_OPENAI_MODEL"])
             .unwrap_or_else(|| DEFAULT_OPENAI_MODEL.to_string());
+        let reasoning_effort = env_first(&[
+            "OPENAI_REASONING_EFFORT",
+            "MEMINI_REASONING_EFFORT",
+            "OPENAI_THINKING",
+            "MEMINI_THINKING",
+        ])
+        .and_then(|raw| parse_reasoning_setting(&raw))
+        .flatten();
         let base_url = env_first(&["OPENAI_BASE_URL", "OPENAI_API_BASE"])
             .unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.to_string());
         OpenAiClient {
             model,
+            reasoning_effort,
             base_url: base_url.trim_end_matches('/').to_string(),
             http_client: HttpClient::new(),
         }
@@ -47,10 +57,29 @@ impl OpenAiClient {
             "model": self.model,
             "input": input,
         });
+        if let Some(effort) = &self.reasoning_effort {
+            body["reasoning"] = json!({ "effort": effort });
+        }
         if let Some(tools) = tools {
             body["tools"] = Value::Array(tools.to_vec());
         }
-        self.request(key, "responses", body).await
+        match self.request(key, "responses", body.clone()).await {
+            Ok(value) => Ok(value),
+            Err(err) => {
+                let should_retry_without_reasoning = body.get("reasoning").is_some() && {
+                    let message = err.to_string().to_ascii_lowercase();
+                    message.contains("reasoning") || message.contains("effort")
+                };
+                if !should_retry_without_reasoning {
+                    return Err(err);
+                }
+                let mut fallback_body = body;
+                if let Some(obj) = fallback_body.as_object_mut() {
+                    obj.remove("reasoning");
+                }
+                self.request(key, "responses", fallback_body).await
+            }
+        }
     }
 
     async fn request(&self, key: &str, path: &str, body: Value) -> Result<Value> {
@@ -146,6 +175,23 @@ pub fn extract_tool_calls(output_items: &[Value]) -> Vec<ToolCall> {
 /// Returns `true` when the tool-call loop has hit the configured ceiling.
 pub fn tool_loop_limit_reached(tool_loops: usize) -> bool {
     tool_loops >= MAX_TOOL_LOOPS
+}
+
+/// Parse model "thinking" / reasoning setting from user or environment input.
+///
+/// Returns:
+/// - `Some(None)` for disabled (`off`, `false`, `none`, ...)
+/// - `Some(Some("low"|"medium"|"high"))` for enabled levels (`on` => `medium`)
+/// - `None` for invalid values
+pub fn parse_reasoning_setting(raw: &str) -> Option<Option<String>> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    let setting = match normalized.as_str() {
+        "off" | "false" | "0" | "none" | "disabled" | "no" => None,
+        "on" | "true" | "1" | "enabled" | "yes" => Some("medium".to_string()),
+        "low" | "medium" | "high" => Some(normalized),
+        _ => return None,
+    };
+    Some(setting)
 }
 
 /// Pretty-print any serialisable value as JSON, with a safe fallback.

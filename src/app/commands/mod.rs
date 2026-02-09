@@ -6,7 +6,7 @@
 //! | Module    | Commands                              |
 //! |-----------|---------------------------------------|
 //! | `mcp`     | `/mcp` – connect, auth, tools, call   |
-//! | `openai`  | `/openai`, `/key`, `/rice`, bootstrap |
+//! | `openai`  | `/openai`, `/model`, `/key`, `/rice`, bootstrap |
 //! | `agents`  | `/agent`, `/thread`, `/memory`        |
 //! | `daemons` | `/daemon`, `/auto`, `/spawn`, `/reply`|
 //! | `share`   | `/share`                              |
@@ -37,6 +37,7 @@ impl App {
             "/clear" => self.logs.clear(),
             "/mcp" => self.handle_mcp_command(parts.collect()),
             "/openai" => self.handle_openai_command(parts.collect()),
+            "/model" => self.handle_model_command(parts.collect()),
             "/key" => self.handle_key_command(parts.collect()),
             "/rice" => self.handle_rice_command(parts.collect()),
             "/agent" => self.handle_agent_command(parts.collect()),
@@ -131,6 +132,10 @@ impl App {
             "Settings",
             "  /openai                 Show AI key status",
             "  /openai set <key>       Save your OpenAI key (stored in Rice)",
+            "  /model                  Show active model + thinking mode",
+            "  /model list             Show model picking guidance",
+            "  /model set <name>       Set active model",
+            "  /model thinking <mode>  Set thinking: on|off|low|medium|high",
             "  /key <key>              Quick set OpenAI key",
             "  /rice                   Show Rice memory connection status",
             "  /rice setup             Interactive Rice environment wizard",
