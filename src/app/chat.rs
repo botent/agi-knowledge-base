@@ -135,10 +135,10 @@ impl App {
             }
         });
         vec![
-            spawn_tool,
-            collect_tool,
             rice_memories_tool,
             rice_state_get_tool,
+            spawn_tool,
+            collect_tool,
         ]
     }
 

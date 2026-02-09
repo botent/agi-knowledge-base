@@ -313,12 +313,81 @@ fn selected_local_tools(tool_selectors: &[String]) -> Vec<Value> {
         .collect()
 }
 
+fn rice_memory_tool_defs() -> Vec<Value> {
+    vec![
+        json!({
+            "type": "function",
+            "name": "rice_memories",
+            "description": "Fetch relevant memories from Rice. Use this first for memory/history questions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Optional memory search query. Use 'recent activity' when the user asks for recent memories."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Optional number of memories to return (default 6, max 50)."
+                    }
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "name": "rice_state_get",
+            "description": "Read a Rice state variable by key.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": "State variable key (for example openai_model or conversation_thread)."
+                    }
+                },
+                "required": ["key"]
+            }
+        }),
+    ]
+}
+
+fn with_rice_priority_tools(mut tools: Vec<Value>) -> Vec<Value> {
+    let mut prioritized = rice_memory_tool_defs();
+    prioritized.append(&mut tools);
+    prioritized
+}
+
+fn is_rice_memory_state_tool(name: &str) -> bool {
+    name == "rice_memories" || name == "rice_state_get"
+}
+
+fn is_workspace_or_delegation_tool(name: &str) -> bool {
+    if name == "spawn_agent" || name == "collect_results" {
+        return true;
+    }
+    if name.starts_with("workspace_") {
+        return true;
+    }
+    if let Some((_, tool_name)) = mcp::split_namespaced_tool_name(name) {
+        return tool_name.starts_with("workspace_");
+    }
+    false
+}
+
+fn rice_first_tool_error() -> String {
+    r#"{"error":"Rice-first rule: use rice_memories/rice_state_get before workspace or delegation tools for memory/state requests."}"#
+        .to_string()
+}
+
 async fn run_daemon_task_once(
     def: &DaemonTaskDef,
     openai: &OpenAiClient,
     key: &str,
     rice: &mut RiceStore,
 ) -> String {
+    let memory_or_state_query = message_requests_memory_or_state(&def.prompt);
+    let mut rice_first_satisfied = !memory_or_state_query;
+
     let memories = match rice.reminisce(vec![], 6, &def.prompt).await {
         Ok(traces) => traces,
         Err(_) => Vec::new(),
@@ -326,11 +395,17 @@ async fn run_daemon_task_once(
 
     let memory_ctx = crate::rice::format_memories(&memories);
     let now = Local::now().format("%A, %B %e, %Y at %H:%M");
-    let all_tools = selected_local_tools(&def.tools);
+    let all_tools = with_rice_priority_tools(selected_local_tools(&def.tools));
 
     let system_prompt =
         crate::prompts::worker_system_prompt(&def.persona, &now.to_string(), !all_tools.is_empty());
     let mut input = vec![json!({"role": "system", "content": system_prompt})];
+    if memory_or_state_query {
+        input.push(json!({
+            "role": "system",
+            "content": "For memory/state work, use rice_memories and/or rice_state_get first. Use workspace tools only if Rice output is insufficient and file context is explicitly needed."
+        }));
+    }
     if !memory_ctx.is_empty() {
         input.push(json!({"role": "system", "content": memory_ctx}));
     }
@@ -362,8 +437,18 @@ async fn run_daemon_task_once(
         tool_loops += 1;
 
         for call in &tool_calls {
-            let tool_output = if let Some(output) = crate::local_tools::handle_tool_call(call).await
+            let tool_output = if memory_or_state_query
+                && !rice_first_satisfied
+                && is_workspace_or_delegation_tool(&call.name)
             {
+                rice_first_tool_error()
+            } else if call.name == "rice_memories" {
+                rice_first_satisfied = true;
+                handle_rice_memories_bg(call, rice, 6).await
+            } else if call.name == "rice_state_get" {
+                rice_first_satisfied = true;
+                handle_rice_state_get_bg(call, rice).await
+            } else if let Some(output) = crate::local_tools::handle_tool_call(call).await {
                 output
             } else {
                 format!(
@@ -467,6 +552,8 @@ pub fn spawn_agent_window(
 
         let memory_ctx = crate::rice::format_memories(&memories);
         let now = Local::now().format("%A, %B %e, %Y at %H:%M");
+        let memory_or_state_query = message_requests_memory_or_state(&prompt);
+        let mut rice_first_satisfied = !memory_or_state_query;
 
         // -- Step 2: Build prompt and run tool loop
         let _ = tx.send(AgentEvent::Progress {
@@ -474,10 +561,16 @@ pub fn spawn_agent_window(
             line: "Thinking...".to_string(),
         });
 
-        let all_tools = crate::local_tools::tool_defs();
+        let all_tools = with_rice_priority_tools(crate::local_tools::tool_defs());
         let system_prompt =
             crate::prompts::worker_system_prompt(&persona, &now.to_string(), !all_tools.is_empty());
         let mut input = vec![json!({"role": "system", "content": system_prompt})];
+        if memory_or_state_query {
+            input.push(json!({
+                "role": "system",
+                "content": "For memory/state work, use rice_memories and/or rice_state_get first. Use workspace tools only if Rice output is insufficient and file context is explicitly needed."
+            }));
+        }
         if !skill_context.trim().is_empty() {
             input.push(json!({"role": "system", "content": skill_context.clone()}));
         }
@@ -533,12 +626,22 @@ pub fn spawn_agent_window(
                     line: format!("Calling tool: {}", call.name),
                 });
 
-                let tool_output =
-                    if let Some(output) = crate::local_tools::handle_tool_call(call).await {
-                        output
-                    } else {
-                        format!(r#"{{"error":"Unknown tool '{}'"}}"#, call.name)
-                    };
+                let tool_output = if memory_or_state_query
+                    && !rice_first_satisfied
+                    && is_workspace_or_delegation_tool(&call.name)
+                {
+                    rice_first_tool_error()
+                } else if call.name == "rice_memories" {
+                    rice_first_satisfied = true;
+                    handle_rice_memories_bg(call, &mut rice, 6).await
+                } else if call.name == "rice_state_get" {
+                    rice_first_satisfied = true;
+                    handle_rice_state_get_bg(call, &mut rice).await
+                } else if let Some(output) = crate::local_tools::handle_tool_call(call).await {
+                    output
+                } else {
+                    format!(r#"{{"error":"Unknown tool '{}'"}}"#, call.name)
+                };
 
                 let _ = tx.send(AgentEvent::Progress {
                     window_id,
@@ -739,6 +842,7 @@ pub fn spawn_agent_window_with_mcp(
             }
         }
         all_tools.extend(crate::local_tools::tool_defs());
+        all_tools = with_rice_priority_tools(all_tools);
 
         // -- Step 2: Recall memories
         let _ = tx.send(AgentEvent::Progress {
@@ -760,6 +864,8 @@ pub fn spawn_agent_window_with_mcp(
 
         let memory_ctx = crate::rice::format_memories(&memories);
         let now = Local::now().format("%A, %B %e, %Y at %H:%M");
+        let memory_or_state_query = message_requests_memory_or_state(&prompt);
+        let mut rice_first_satisfied = !memory_or_state_query;
 
         // -- Step 3: Build prompt and run tool loop
         let _ = tx.send(AgentEvent::Progress {
@@ -770,6 +876,12 @@ pub fn spawn_agent_window_with_mcp(
         let system_prompt =
             crate::prompts::worker_system_prompt(&persona, &now.to_string(), !all_tools.is_empty());
         let mut input = vec![json!({"role": "system", "content": system_prompt})];
+        if memory_or_state_query {
+            input.push(json!({
+                "role": "system",
+                "content": "For memory/state work, use rice_memories and/or rice_state_get first. Use workspace tools only if Rice output is insufficient and file context is explicitly needed."
+            }));
+        }
         if !skill_context.trim().is_empty() {
             input.push(json!({"role": "system", "content": skill_context.clone()}));
         }
@@ -825,24 +937,35 @@ pub fn spawn_agent_window_with_mcp(
                     line: format!("Calling tool: {}", call.name),
                 });
 
-                let tool_output =
-                    if let Some(output) = crate::local_tools::handle_tool_call(call).await {
-                        output
-                    } else if let Some((server_id, tool_name)) =
-                        mcp::split_namespaced_tool_name(&call.name)
-                    {
-                        if let Some(conn) = connections.iter().find(|c| c.server.id == server_id) {
-                            match mcp::call_tool(conn, tool_name, call.arguments.clone()).await {
-                                Ok(value) => serde_json::to_string(&value)
-                                    .unwrap_or_else(|_| "{}".to_string()),
-                                Err(err) => format!(r#"{{"error":"{err}"}}"#),
+                let tool_output = if memory_or_state_query
+                    && !rice_first_satisfied
+                    && is_workspace_or_delegation_tool(&call.name)
+                {
+                    rice_first_tool_error()
+                } else if call.name == "rice_memories" {
+                    rice_first_satisfied = true;
+                    handle_rice_memories_bg(call, &mut rice, 6).await
+                } else if call.name == "rice_state_get" {
+                    rice_first_satisfied = true;
+                    handle_rice_state_get_bg(call, &mut rice).await
+                } else if let Some(output) = crate::local_tools::handle_tool_call(call).await {
+                    output
+                } else if let Some((server_id, tool_name)) =
+                    mcp::split_namespaced_tool_name(&call.name)
+                {
+                    if let Some(conn) = connections.iter().find(|c| c.server.id == server_id) {
+                        match mcp::call_tool(conn, tool_name, call.arguments.clone()).await {
+                            Ok(value) => {
+                                serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string())
                             }
-                        } else {
-                            format!(r#"{{"error":"No MCP connection for server '{server_id}'"}}"#)
+                            Err(err) => format!(r#"{{"error":"{err}"}}"#),
                         }
                     } else {
-                        format!(r#"{{"error":"Unresolvable tool '{}'"}}"#, call.name)
-                    };
+                        format!(r#"{{"error":"No MCP connection for server '{server_id}'"}}"#)
+                    }
+                } else {
+                    format!(r#"{{"error":"Unresolvable tool '{}'"}}"#, call.name)
+                };
 
                 let _ = tx.send(AgentEvent::Progress {
                     window_id,
@@ -1076,18 +1199,8 @@ pub fn spawn_chat_task(
             }
         }
 
-        // Add built-in tools (spawn_agent, collect_results).
+        // Add built-in tools.
         all_tools.extend(builtin_tools);
-        if memory_or_state_query {
-            // For pure memory/state asks, avoid orchestration detours.
-            all_tools.retain(|tool| {
-                let name = tool
-                    .get("name")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                name != "spawn_agent" && name != "collect_results"
-            });
-        }
 
         // ── Step 4: Build LLM input ──────────────────────────────────
         let memory_context = rice::format_memories(&memories);
@@ -1097,7 +1210,7 @@ pub fn spawn_chat_task(
         if memory_or_state_query {
             input.push(json!({
                 "role": "system",
-                "content": "The user is asking about Rice memory/state. Use `rice_memories` and/or `rice_state_get` first. Avoid spawning file/workspace agents unless the user explicitly asks for file operations."
+                "content": "The user is asking about Rice memory/state. Use `rice_memories` and/or `rice_state_get` first. Only use workspace or delegation tools after Rice output is insufficient."
             }));
         }
         if !skill_context.trim().is_empty() {
@@ -1147,6 +1260,7 @@ pub fn spawn_chat_task(
         let mut output_text = openai::extract_output_text(&output_items);
         let mut tool_calls = openai::extract_tool_calls(&output_items);
         let mut tool_loops = 0usize;
+        let mut rice_first_satisfied = !memory_or_state_query;
 
         // ── Step 6: Tool-call loop ───────────────────────────────────
         while !tool_calls.is_empty() {
@@ -1165,7 +1279,12 @@ pub fn spawn_chat_task(
                     level: ChatLogLevel::Info,
                 });
 
-                let tool_output = if call.name == "spawn_agent" {
+                let tool_output = if memory_or_state_query
+                    && !rice_first_satisfied
+                    && is_workspace_or_delegation_tool(&call.name)
+                {
+                    rice_first_tool_error()
+                } else if call.name == "spawn_agent" {
                     handle_spawn_agent_bg(
                         call,
                         &mcp_snapshots,
@@ -1204,6 +1323,9 @@ pub fn spawn_chat_task(
                         format!(r#"{{"error":"Unknown tool '{}'"}}"#, call.name)
                     }
                 };
+                if is_rice_memory_state_tool(&call.name) {
+                    rice_first_satisfied = true;
+                }
 
                 input.push(json!({
                     "type": "function_call_output",
@@ -1509,7 +1631,10 @@ async fn handle_collect_results_bg(call: &openai::ToolCall, rice: &mut RiceStore
 
 #[cfg(test)]
 mod tests {
-    use super::message_requests_memory_or_state;
+    use super::{
+        is_rice_memory_state_tool, is_workspace_or_delegation_tool,
+        message_requests_memory_or_state,
+    };
 
     #[test]
     fn detects_memory_queries() {
@@ -1536,5 +1661,24 @@ mod tests {
         assert!(!message_requests_memory_or_state(
             "refactor app state machine transitions"
         ));
+    }
+
+    #[test]
+    fn detects_rice_tool_names() {
+        assert!(is_rice_memory_state_tool("rice_memories"));
+        assert!(is_rice_memory_state_tool("rice_state_get"));
+        assert!(!is_rice_memory_state_tool("workspace_list_files"));
+    }
+
+    #[test]
+    fn detects_workspace_and_delegation_tool_names() {
+        assert!(is_workspace_or_delegation_tool("spawn_agent"));
+        assert!(is_workspace_or_delegation_tool("collect_results"));
+        assert!(is_workspace_or_delegation_tool("workspace_list_files"));
+        assert!(is_workspace_or_delegation_tool(
+            "server_alpha__workspace_read_file"
+        ));
+        assert!(!is_workspace_or_delegation_tool("rice_memories"));
+        assert!(!is_workspace_or_delegation_tool("server_alpha__search_web"));
     }
 }
