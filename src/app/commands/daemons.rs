@@ -122,6 +122,11 @@ impl App {
                     "Put .md files with front matter here to define reusable auto-agents."
                         .to_string(),
                 );
+                self.log(
+                    LogLevel::Info,
+                    "Optional trigger fields: trigger_events: VariableUpdate, trigger_variables: foo,bar.*"
+                        .to_string(),
+                );
             }
             Err(err) => {
                 log_src!(
@@ -207,6 +212,8 @@ impl App {
                     persona: spec.persona,
                     prompt: spec.instructions,
                     interval_secs: spec.interval_secs,
+                    trigger_events: Vec::new(),
+                    trigger_variables: Vec::new(),
                     tools: spec.tools,
                     paused: false,
                 };
@@ -245,6 +252,8 @@ impl App {
             persona: recipe.persona.clone(),
             prompt: recipe.instructions.clone(),
             interval_secs: recipe.interval_secs,
+            trigger_events: recipe.trigger_events.clone(),
+            trigger_variables: recipe.trigger_variables.clone(),
             tools: recipe.tools.clone(),
             paused,
         }
@@ -346,15 +355,20 @@ impl App {
             } else {
                 recipe.description.clone()
             };
+            let trigger_info = recipe
+                .trigger_summary()
+                .map(|summary| format!(", trigger:{summary}"))
+                .unwrap_or_default();
             self.log(
                 LogLevel::Info,
                 format!(
-                    "  {} -- {} [{}s, {}, file:{}]",
+                    "  {} -- {} [{}s, {}, file:{}{}]",
                     recipe.name,
                     preview,
                     recipe.interval_secs,
                     status,
-                    recipe.path.display()
+                    recipe.path.display(),
+                    trigger_info
                 ),
             );
         }
@@ -522,6 +536,8 @@ impl App {
                     persona: spec.persona,
                     prompt: spec.instructions,
                     interval_secs: spec.interval_secs,
+                    trigger_events: Vec::new(),
+                    trigger_variables: Vec::new(),
                     tools: spec.tools,
                     paused: false,
                 };
@@ -727,7 +743,15 @@ impl App {
             );
             self.log(
                 LogLevel::Info,
-                "Use Ctrl+1..9 to focus a window, Ctrl+0 to unfocus.".to_string(),
+                "Use Tab/Shift-Tab or PgUp/PgDn on dashboard to scroll live agents; Enter opens selected.".to_string(),
+            );
+            self.log(
+                LogLevel::Info,
+                "Use Alt+Enter (or Ctrl+J) to add a newline in the input composer.".to_string(),
+            );
+            self.log(
+                LogLevel::Info,
+                "Use Ctrl+1..9 to focus a window quickly, Ctrl+0 to unfocus.".to_string(),
             );
             return;
         }
@@ -756,6 +780,10 @@ impl App {
             output_lines: Vec::new(),
             pending_question: None,
             scroll: 0,
+            persona: self.active_agent.persona.clone(),
+            skill_context: self.skills_prompt_context(prompt),
+            mcp_snapshots: Vec::new(),
+            coordination_key: String::new(),
         };
         self.agent_windows.push(window);
 

@@ -23,9 +23,10 @@ mod logging;
 mod store;
 mod ui;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::Local;
@@ -38,7 +39,7 @@ use crate::mcp::McpConnection;
 use crate::mcp::config::{McpConfig, McpServer, McpSource};
 use crate::mcp::oauth::PendingOAuth;
 use crate::openai::OpenAiClient;
-use crate::rice::RiceStore;
+use crate::rice::{RiceStatus, RiceStore};
 use crate::util::env_first;
 
 use self::agents::Agent;
@@ -65,6 +66,77 @@ pub(crate) enum RiceSetupStep {
     StorageUrl,
     StorageToken,
 }
+
+fn trigger_variable_name(payload: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(payload).ok()?;
+    if let Some(name) = parsed.get("name").and_then(|value| value.as_str()) {
+        return Some(name.to_string());
+    }
+    parsed
+        .get("variable")
+        .and_then(|value| value.get("name"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
+}
+
+fn trigger_prompt(
+    recipe: &agent_recipes::AgentRecipe,
+    run_id: &str,
+    event_type: &str,
+    agent_id: &str,
+    variable_name: Option<&str>,
+    payload: &str,
+) -> String {
+    format!(
+        "{instructions}\n\n{}",
+        trigger_context_block(run_id, event_type, agent_id, variable_name, payload),
+        instructions = recipe.instructions
+    )
+}
+
+fn trigger_context_block(
+    run_id: &str,
+    event_type: &str,
+    agent_id: &str,
+    variable_name: Option<&str>,
+    payload: &str,
+) -> String {
+    let payload_preview: String = payload.chars().take(4000).collect();
+    let variable_line = variable_name.unwrap_or("(none)");
+    format!(
+        "Trigger context:\n- run_id: {run_id}\n- event_type: {event_type}\n- source_agent: {agent_id}\n- variable_name: {variable_line}\n- payload_json: {payload_preview}"
+    )
+}
+
+fn live_window_trigger_prompt(
+    base_prompt: &str,
+    run_id: &str,
+    event_type: &str,
+    agent_id: &str,
+    variable_name: Option<&str>,
+    payload: &str,
+) -> String {
+    format!(
+        "You are continuing your existing live task.\nOriginal task:\n{base_prompt}\n\n{}\n\nUpdate your plan and execute using this new state context. Continue from current progress (do not restart from scratch).",
+        trigger_context_block(run_id, event_type, agent_id, variable_name, payload)
+    )
+}
+
+fn active_daemon_trigger_prompt(
+    base_prompt: &str,
+    run_id: &str,
+    event_type: &str,
+    agent_id: &str,
+    variable_name: Option<&str>,
+    payload: &str,
+) -> String {
+    format!(
+        "{base_prompt}\n\n{}\n\nPrioritize the trigger update above and produce a fresh result for this run.",
+        trigger_context_block(run_id, event_type, agent_id, variable_name, payload)
+    )
+}
+
+const TRIGGER_RUN_COOLDOWN_SECS: u64 = 5;
 
 // ── Application state ────────────────────────────────────────────────
 
@@ -105,6 +177,9 @@ pub struct App {
     pub(crate) daemon_rx: mpsc::UnboundedReceiver<AgentEvent>,
     pub(crate) daemon_handles: Vec<DaemonHandle>,
     pub(crate) daemon_results: Vec<(String, String, String)>, // (task_name, message, timestamp)
+    pub(crate) rice_trigger_listener: Option<tokio::task::JoinHandle<()>>,
+    pub(crate) trigger_last_run: HashMap<String, Instant>,
+    pub(crate) window_active_runs: HashMap<usize, usize>,
     // Agent windows (live interactive agents in side panel)
     pub(crate) agent_windows: Vec<AgentWindow>,
     // FIFO queue of window ids waiting for user input.
@@ -171,6 +246,9 @@ impl App {
             daemon_rx,
             daemon_handles: Vec::new(),
             daemon_results: Vec::new(),
+            rice_trigger_listener: None,
+            trigger_last_run: HashMap::new(),
+            window_active_runs: HashMap::new(),
             agent_windows: Vec::new(),
             pending_input_queue: VecDeque::new(),
             next_window_id: Arc::new(AtomicUsize::new(1)),
@@ -323,6 +401,7 @@ impl App {
 
         // Auto-start recipe-based background agents marked `auto_start: true`.
         self.autostart_daemon_recipes();
+        self.restart_rice_trigger_listener();
     }
 
     /// Whether the user has requested to quit.
@@ -376,6 +455,48 @@ impl App {
                 })
             })
             .collect()
+    }
+
+    fn mark_window_run_started(&mut self, window_id: usize) -> usize {
+        let entry = self.window_active_runs.entry(window_id).or_insert(0);
+        *entry = entry.saturating_add(1);
+        *entry
+    }
+
+    fn mark_window_run_finished(&mut self, window_id: usize) -> usize {
+        let mut remaining = 0usize;
+        if let Some(entry) = self.window_active_runs.get_mut(&window_id) {
+            if *entry > 0 {
+                *entry -= 1;
+            }
+            remaining = *entry;
+            if *entry == 0 {
+                self.window_active_runs.remove(&window_id);
+            }
+        }
+        remaining
+    }
+
+    fn move_live_agent_selection(&mut self, delta: isize) {
+        if self.agent_windows.is_empty() {
+            return;
+        }
+        let len = self.agent_windows.len() as isize;
+        let current = self.grid_selected.min(self.agent_windows.len() - 1) as isize;
+        let next = (current + delta).clamp(0, len.saturating_sub(1));
+        self.grid_selected = next as usize;
+    }
+
+    fn cycle_live_agent_selection(&mut self, forward: bool) {
+        if self.agent_windows.is_empty() {
+            return;
+        }
+        let len = self.agent_windows.len();
+        self.grid_selected = if forward {
+            (self.grid_selected + 1) % len
+        } else {
+            (self.grid_selected + len - 1) % len
+        };
     }
 
     fn parse_inline_agent_reply(line: &str) -> Option<(usize, String)> {
@@ -455,13 +576,13 @@ impl App {
                 }
             }
 
-            KeyEvent { code, .. } => {
+            key_event => {
                 // View-mode aware dispatch for arrow keys, Enter, Esc.
                 match &self.view_mode {
-                    ViewMode::Dashboard => self.handle_dashboard_key(code)?,
+                    ViewMode::Dashboard => self.handle_dashboard_key(key_event)?,
                     ViewMode::AgentSession(wid) => {
                         let wid = *wid;
-                        self.handle_session_key(code, wid)?;
+                        self.handle_session_key(key_event, wid)?;
                     }
                 }
             }
@@ -469,13 +590,30 @@ impl App {
         Ok(())
     }
 
+    fn should_insert_newline(key: &KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Enter => key
+                .modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT),
+            KeyCode::Char('j') => key.modifiers.contains(KeyModifiers::CONTROL),
+            _ => false,
+        }
+    }
+
     /// Key handling while on the dashboard (agent selection + input).
-    fn handle_dashboard_key(&mut self, code: KeyCode) -> Result<()> {
+    fn handle_dashboard_key(&mut self, key: KeyEvent) -> Result<()> {
         if !self.agent_windows.is_empty() && self.grid_selected >= self.agent_windows.len() {
             self.grid_selected = self.agent_windows.len() - 1;
         }
 
-        match code {
+        if Self::should_insert_newline(&key) {
+            self.scroll_offset = 0;
+            self.history_index = None;
+            self.insert_char('\n');
+            return Ok(());
+        }
+
+        match key.code {
             // Enter with empty input and a selected agent → open that session.
             KeyCode::Enter if self.input.is_empty() => {
                 if let Some(window) = self.agent_windows.get(self.grid_selected) {
@@ -519,22 +657,40 @@ impl App {
             KeyCode::End => self.move_cursor_end(),
             KeyCode::Up => self.history_prev(),
             KeyCode::Down => self.history_next(),
-            KeyCode::PageUp => self.scroll_up(10),
-            KeyCode::PageDown => self.scroll_down(10),
-            KeyCode::Tab => {
-                // Tab on dashboard cycles live-agent selection forward.
-                if !self.agent_windows.is_empty() {
-                    self.grid_selected = (self.grid_selected + 1) % self.agent_windows.len();
+            KeyCode::PageUp => {
+                if self.input.is_empty() && !self.agent_windows.is_empty() {
+                    self.move_live_agent_selection(-5);
+                } else {
+                    self.scroll_up(10);
                 }
             }
+            KeyCode::PageDown => {
+                if self.input.is_empty() && !self.agent_windows.is_empty() {
+                    self.move_live_agent_selection(5);
+                } else {
+                    self.scroll_down(10);
+                }
+            }
+            KeyCode::Tab => {
+                // Tab on dashboard cycles live-agent selection forward.
+                self.cycle_live_agent_selection(true);
+            }
+            KeyCode::BackTab => self.cycle_live_agent_selection(false),
             _ => {}
         }
         Ok(())
     }
 
     /// Key handling while in an agent session (full-screen agent view).
-    fn handle_session_key(&mut self, code: KeyCode, window_id: usize) -> Result<()> {
-        match code {
+    fn handle_session_key(&mut self, key: KeyEvent, window_id: usize) -> Result<()> {
+        if Self::should_insert_newline(&key) {
+            self.scroll_offset = 0;
+            self.history_index = None;
+            self.insert_char('\n');
+            return Ok(());
+        }
+
+        match key.code {
             // Esc returns to dashboard.
             KeyCode::Esc => {
                 if !self.input.is_empty() {
@@ -581,18 +737,18 @@ impl App {
 
     /// Submit the current input line for processing.
     fn submit_input(&mut self) -> Result<()> {
-        let line = self.input.trim().to_string();
-        self.input.clear();
+        let line = std::mem::take(&mut self.input);
+        let trimmed_line = line.trim().to_string();
         self.cursor = 0;
         self.history_index = None;
 
         // ── Rice setup wizard intercept ──────────────────────────────
         if let Some(step) = self.rice_setup_step.clone() {
-            self.handle_rice_setup_input(&line, step);
+            self.handle_rice_setup_input(&trimmed_line, step);
             return Ok(());
         }
 
-        if line.is_empty() {
+        if trimmed_line.is_empty() {
             return Ok(());
         }
 
@@ -619,8 +775,8 @@ impl App {
             return Ok(());
         }
 
-        if line.starts_with('/') {
-            self.handle_command(&line)?;
+        if trimmed_line.starts_with('/') && !line.contains('\n') {
+            self.handle_command(&trimmed_line)?;
         } else {
             // FIFO mode: if any agents are waiting, route plain input to the
             // oldest waiting request.
@@ -664,8 +820,26 @@ impl App {
     /// Handle mouse events (scroll wheel / trackpad).
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
-            MouseEventKind::ScrollUp => self.scroll_up(3),
-            MouseEventKind::ScrollDown => self.scroll_down(3),
+            MouseEventKind::ScrollUp => {
+                if matches!(self.view_mode, ViewMode::Dashboard)
+                    && !self.agent_windows.is_empty()
+                    && self.input.is_empty()
+                {
+                    self.move_live_agent_selection(-1);
+                } else {
+                    self.scroll_up(3);
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if matches!(self.view_mode, ViewMode::Dashboard)
+                    && !self.agent_windows.is_empty()
+                    && self.input.is_empty()
+                {
+                    self.move_live_agent_selection(1);
+                } else {
+                    self.scroll_down(3);
+                }
+            }
             _ => {}
         }
     }
@@ -743,11 +917,19 @@ impl App {
         while let Ok(event) = self.daemon_rx.try_recv() {
             match event {
                 AgentEvent::Started { window_id } => {
+                    let in_flight = self.mark_window_run_started(window_id);
                     if let Some(win) = self.agent_windows.iter_mut().find(|w| w.id == window_id) {
-                        win.status = AgentWindowStatus::Thinking;
-                        win.output_lines.push("-- started --".to_string());
+                        if win.status != AgentWindowStatus::WaitingForInput {
+                            win.status = AgentWindowStatus::Thinking;
+                        }
+                        if in_flight > 1 {
+                            win.output_lines.push(format!(
+                                "-- parallel run started ({in_flight} in flight) --"
+                            ));
+                        } else {
+                            win.output_lines.push("-- started --".to_string());
+                        }
                     }
-                    self.dequeue_waiting_window(window_id);
                 }
                 AgentEvent::Progress { window_id, line } => {
                     if let Some(win) = self.agent_windows.iter_mut().find(|w| w.id == window_id) {
@@ -759,12 +941,25 @@ impl App {
                     message,
                     timestamp,
                 } => {
+                    let remaining = self.mark_window_run_finished(window_id);
                     if let Some(win) = self.agent_windows.iter_mut().find(|w| w.id == window_id) {
-                        win.status = AgentWindowStatus::Done;
+                        let was_waiting = win.status == AgentWindowStatus::WaitingForInput;
+                        if remaining == 0 {
+                            if !was_waiting {
+                                win.status = AgentWindowStatus::Done;
+                                win.pending_question = None;
+                            }
+                        } else {
+                            if !was_waiting {
+                                win.status = AgentWindowStatus::Thinking;
+                                win.pending_question = None;
+                            }
+                        }
                         win.output_lines.push(format!("-- done at {timestamp} --"));
-                        win.pending_question = None;
                     }
-                    self.dequeue_waiting_window(window_id);
+                    if remaining == 0 {
+                        self.dequeue_waiting_window(window_id);
+                    }
                     // Also log to main chat.
                     let label = self
                         .agent_windows
@@ -778,6 +973,7 @@ impl App {
                     window_id,
                     question,
                 } => {
+                    let _ = self.mark_window_run_finished(window_id);
                     let mut label = format!("Agent #{window_id}");
                     if let Some(win) = self.agent_windows.iter_mut().find(|w| w.id == window_id) {
                         win.status = AgentWindowStatus::WaitingForInput;
@@ -871,6 +1067,10 @@ impl App {
                         output_lines: Vec::new(),
                         pending_question: None,
                         scroll: 0,
+                        persona: persona.clone(),
+                        skill_context: skill_context.clone(),
+                        mcp_snapshots: mcp_snapshots.clone(),
+                        coordination_key: coordination_key.clone(),
                     };
                     self.agent_windows.push(window);
                     let idx = self.agent_windows.len().saturating_sub(1);
@@ -910,6 +1110,14 @@ impl App {
                             self.runtime.handle().clone(),
                         );
                     }
+                }
+                AgentEvent::RiceStateEvent {
+                    run_id,
+                    event_type,
+                    agent_id,
+                    payload,
+                } => {
+                    self.handle_rice_trigger_event(run_id, event_type, agent_id, payload);
                 }
             }
         }
@@ -1126,6 +1334,140 @@ impl App {
                 );
             }
         }
+        self.restart_rice_trigger_listener();
+    }
+
+    fn spawn_agent_window_run(
+        &mut self,
+        window_id: usize,
+        prompt: String,
+        status_line: Option<String>,
+        clear_waiting_input: bool,
+    ) -> bool {
+        let Some((persona, skill_context, mcp_snapshots, coordination_key)) = self
+            .agent_windows
+            .iter()
+            .find(|w| w.id == window_id)
+            .map(|w| {
+                (
+                    w.persona.clone(),
+                    w.skill_context.clone(),
+                    w.mcp_snapshots.clone(),
+                    w.coordination_key.clone(),
+                )
+            })
+        else {
+            return false;
+        };
+
+        if let Some(win) = self.agent_windows.iter_mut().find(|w| w.id == window_id) {
+            if let Some(line) = status_line {
+                win.output_lines.push(line);
+            }
+            if clear_waiting_input {
+                win.pending_question = None;
+            }
+            if clear_waiting_input || win.status != AgentWindowStatus::WaitingForInput {
+                win.status = AgentWindowStatus::Thinking;
+            }
+        }
+        if clear_waiting_input {
+            self.dequeue_waiting_window(window_id);
+        }
+
+        let tx = self.daemon_tx.clone();
+        let openai = self.openai.clone();
+        let key = self.openai_key.clone();
+        let rice_handle = self.runtime.spawn(RiceStore::connect());
+
+        if mcp_snapshots.is_empty() {
+            daemon::spawn_agent_window(
+                window_id,
+                persona,
+                prompt,
+                skill_context,
+                tx,
+                openai,
+                key,
+                rice_handle,
+                self.runtime.handle().clone(),
+            );
+        } else {
+            daemon::spawn_agent_window_with_mcp(
+                window_id,
+                coordination_key,
+                persona,
+                prompt,
+                skill_context,
+                mcp_snapshots,
+                tx,
+                openai,
+                key,
+                rice_handle,
+                self.runtime.handle().clone(),
+            );
+        }
+
+        true
+    }
+
+    fn dispatch_state_updates_to_live_windows(
+        &mut self,
+        run_id: &str,
+        event_type: &str,
+        agent_id: &str,
+        variable_name: Option<&str>,
+        payload: &str,
+    ) -> usize {
+        let mut started = 0usize;
+        let window_ids: Vec<usize> = self.agent_windows.iter().map(|window| window.id).collect();
+
+        for window_id in window_ids {
+            let key = format!("window:{window_id}");
+            if let Some(last_run) = self.trigger_last_run.get(&key) {
+                if last_run.elapsed() < Duration::from_secs(5) {
+                    continue;
+                }
+            }
+
+            let Some((in_flight_runs, base_prompt)) = self
+                .agent_windows
+                .iter()
+                .find(|window| window.id == window_id)
+                .map(|window| {
+                    (
+                        self.window_active_runs
+                            .get(&window_id)
+                            .copied()
+                            .unwrap_or(0),
+                        window.prompt.clone(),
+                    )
+                })
+            else {
+                continue;
+            };
+
+            let prompt = live_window_trigger_prompt(
+                &base_prompt,
+                run_id,
+                event_type,
+                agent_id,
+                variable_name,
+                payload,
+            );
+            self.trigger_last_run.insert(key, Instant::now());
+
+            let status = if in_flight_runs > 0 {
+                "↻ State update received. Starting parallel run with dynamic context."
+            } else {
+                "↻ State update received. Running with dynamic context."
+            };
+            if self.spawn_agent_window_run(window_id, prompt, Some(status.to_string()), false) {
+                started += 1;
+            }
+        }
+
+        started
     }
 
     /// Reply to a focused agent window that is waiting for input.
@@ -1165,27 +1507,7 @@ impl App {
             format!("Replied to agent window {window_id}: {reply}"),
         );
 
-        // Spawn a continuation.
-        let tx = self.daemon_tx.clone();
-        let openai = self.openai.clone();
-        let key = self.openai_key.clone();
-        let rice_handle = self.runtime.spawn(RiceStore::connect());
-        let active_persona = self.active_agent.persona.clone();
-        let skill_context = self.skills_prompt_context(&prompt);
-
-        daemon::spawn_agent_window(
-            window_id,
-            active_persona,
-            prompt,
-            skill_context,
-            tx,
-            openai,
-            key,
-            rice_handle,
-            self.runtime.handle().clone(),
-        );
-
-        true
+        self.spawn_agent_window_run(window_id, prompt, None, true)
     }
 
     /// Spawn a background daemon task, connecting it to the shared channel.
@@ -1231,5 +1553,175 @@ impl App {
             rice_handle,
             self.runtime.handle().clone(),
         );
+    }
+
+    pub(crate) fn restart_rice_trigger_listener(&mut self) {
+        if let Some(handle) = self.rice_trigger_listener.take() {
+            handle.abort();
+        }
+
+        if matches!(self.rice.status, RiceStatus::Disabled(_)) {
+            return;
+        }
+
+        let run_id = self.rice.active_run_id();
+        let tx = self.daemon_tx.clone();
+        let handle = self.runtime.handle().clone().spawn(async move {
+            loop {
+                let mut rice = RiceStore::connect().await;
+                if matches!(rice.status, RiceStatus::Disabled(_)) {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+
+                let subscribe_result = rice
+                    .subscribe_events_with(
+                        run_id.clone(),
+                        vec!["VariableUpdate".to_string(), "Commit".to_string()],
+                        |event| {
+                            let _ = tx.send(AgentEvent::RiceStateEvent {
+                                run_id: event.run_id,
+                                event_type: event.event_type,
+                                agent_id: event.agent_id,
+                                payload: event.payload,
+                            });
+                        },
+                    )
+                    .await;
+
+                if subscribe_result.is_err() {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        });
+        self.rice_trigger_listener = Some(handle);
+    }
+
+    fn handle_rice_trigger_event(
+        &mut self,
+        run_id: String,
+        event_type: String,
+        agent_id: String,
+        payload: String,
+    ) {
+        if event_type.eq_ignore_ascii_case("Commit")
+            && agent_id
+                .to_ascii_lowercase()
+                .starts_with(&format!("{}:", crate::constants::APP_NAME))
+        {
+            return;
+        }
+
+        let recipes = match agent_recipes::load_agent_recipes() {
+            Ok(value) => value,
+            Err(err) => {
+                log_src!(
+                    self,
+                    LogLevel::Warn,
+                    format!("Failed to load trigger recipes: {err:#}")
+                );
+                return;
+            }
+        };
+
+        let variable_name = trigger_variable_name(&payload);
+        let mut started_active = 0usize;
+        let mut started_spawned = 0usize;
+        let mut active_names = HashSet::new();
+
+        let active_candidates: Vec<_> = self
+            .daemon_handles
+            .iter()
+            .filter(|handle| {
+                daemon::trigger_matches(&handle.def, &event_type, variable_name.as_deref())
+            })
+            .map(|handle| handle.def.clone())
+            .collect();
+
+        for mut def in active_candidates {
+            let name = def.name.clone();
+            let cooldown = Duration::from_secs(TRIGGER_RUN_COOLDOWN_SECS);
+            if let Some(last_run) = self.trigger_last_run.get(&name) {
+                if last_run.elapsed() < cooldown {
+                    continue;
+                }
+            }
+            self.trigger_last_run.insert(name.clone(), Instant::now());
+            active_names.insert(name.to_ascii_lowercase());
+            def.prompt = active_daemon_trigger_prompt(
+                &def.prompt,
+                &run_id,
+                &event_type,
+                &agent_id,
+                variable_name.as_deref(),
+                &payload,
+            );
+            self.run_daemon_oneshot(def);
+            started_active += 1;
+        }
+
+        for recipe in recipes {
+            if !recipe.auto_start {
+                continue;
+            }
+            if !recipe.matches_trigger(&event_type, variable_name.as_deref()) {
+                continue;
+            }
+            if active_names.contains(&recipe.name.to_ascii_lowercase()) {
+                continue;
+            }
+
+            let cooldown = Duration::from_secs(TRIGGER_RUN_COOLDOWN_SECS);
+            if let Some(last_run) = self.trigger_last_run.get(&recipe.name) {
+                if last_run.elapsed() < cooldown {
+                    continue;
+                }
+            }
+            self.trigger_last_run
+                .insert(recipe.name.clone(), Instant::now());
+
+            let prompt = trigger_prompt(
+                &recipe,
+                &run_id,
+                &event_type,
+                &agent_id,
+                variable_name.as_deref(),
+                &payload,
+            );
+            let def = daemon::DaemonTaskDef {
+                name: recipe.name.clone(),
+                persona: recipe.persona.clone(),
+                prompt,
+                interval_secs: recipe.interval_secs,
+                trigger_events: recipe.trigger_events.clone(),
+                trigger_variables: recipe.trigger_variables.clone(),
+                tools: recipe.tools.clone(),
+                paused: true,
+            };
+            self.run_daemon_oneshot(def);
+            started_spawned += 1;
+        }
+
+        let live_started = self.dispatch_state_updates_to_live_windows(
+            &run_id,
+            &event_type,
+            &agent_id,
+            variable_name.as_deref(),
+            &payload,
+        );
+
+        let started = started_active + started_spawned + live_started;
+        if started > 0 {
+            let variable_preview = variable_name.unwrap_or_else(|| "(none)".to_string());
+            self.log(
+                LogLevel::Info,
+                format!(
+                    "Rice trigger fired: {event_type} ({variable_preview}) -> active:{started_active}, spawned:{started_spawned}, live:{live_started}."
+                ),
+            );
+        }
     }
 }

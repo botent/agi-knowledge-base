@@ -42,6 +42,8 @@ const EMPTY_HINTS: &[&str] = &[
     "agent vacancy",
 ];
 
+const MAX_INPUT_VISIBLE_LINES: u16 = 6;
+
 impl App {
     /// Get the current spinner frame based on tick count.
     fn spinner_frame(&self) -> &'static str {
@@ -51,6 +53,33 @@ impl App {
     /// Get a gradient accent color for a given index.
     fn accent_color(&self, idx: usize) -> Color {
         ACCENT_COLORS[idx % ACCENT_COLORS.len()]
+    }
+
+    fn input_panel_height(&self) -> u16 {
+        let line_count = self.input.split('\n').count() as u16;
+        line_count
+            .clamp(1, MAX_INPUT_VISIBLE_LINES)
+            .saturating_add(2)
+    }
+
+    fn input_viewport_text(&self, inner_height: u16) -> (String, u16, u16) {
+        let safe_cursor = self.cursor.min(self.input.len());
+        let before = &self.input[..safe_cursor];
+        let cursor_line = before.bytes().filter(|b| *b == b'\n').count();
+        let cursor_col = before
+            .rsplit('\n')
+            .next()
+            .map(|segment| segment.len())
+            .unwrap_or(0);
+
+        let lines: Vec<&str> = self.input.split('\n').collect();
+        let visible_height = inner_height.max(1) as usize;
+        let start_line = (cursor_line + 1).saturating_sub(visible_height);
+        let end_line = (start_line + visible_height).min(lines.len());
+        let text = lines[start_line..end_line].join("\n");
+        let cursor_y = cursor_line.saturating_sub(start_line) as u16;
+        let cursor_x = cursor_col as u16;
+        (text, cursor_x, cursor_y)
     }
     /// Render the full TUI frame, dispatching to the active view mode.
     pub fn draw(&mut self, frame: &mut Frame<'_>) {
@@ -64,13 +93,14 @@ impl App {
 
     /// Home screen: status bar, activity log, agent panels, input prompt, footer.
     fn draw_dashboard(&mut self, frame: &mut Frame<'_>) {
+        let input_height = self.input_panel_height();
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1), // status bar
-                Constraint::Min(1),    // main area
-                Constraint::Length(3), // input prompt
-                Constraint::Length(1), // footer bar
+                Constraint::Length(1),            // status bar
+                Constraint::Min(1),               // main area
+                Constraint::Length(input_height), // input prompt
+                Constraint::Length(1),            // footer bar
             ])
             .split(frame.area());
 
@@ -125,7 +155,9 @@ impl App {
             )
         };
 
-        let input_panel = Paragraph::new(self.input.as_str()).block(
+        let input_inner_height = rows[2].height.saturating_sub(2);
+        let (input_view, cursor_x_raw, cursor_y_raw) = self.input_viewport_text(input_inner_height);
+        let input_panel = Paragraph::new(input_view).wrap(Wrap { trim: false }).block(
             Block::default()
                 .borders(Borders::ALL)
                 .title(prompt_label)
@@ -133,9 +165,21 @@ impl App {
         );
         frame.render_widget(input_panel, rows[2]);
 
-        let input_width = rows[2].width.saturating_sub(2) as usize;
-        let cursor = self.cursor.min(input_width);
-        frame.set_cursor_position(Position::new(rows[2].x + 1 + cursor as u16, rows[2].y + 1));
+        let input_width = rows[2].width.saturating_sub(2);
+        let cursor_x = if input_width == 0 {
+            0
+        } else {
+            cursor_x_raw.min(input_width.saturating_sub(1))
+        };
+        let cursor_y = if input_inner_height == 0 {
+            0
+        } else {
+            cursor_y_raw.min(input_inner_height.saturating_sub(1))
+        };
+        frame.set_cursor_position(Position::new(
+            rows[2].x + 1 + cursor_x,
+            rows[2].y + 1 + cursor_y,
+        ));
 
         // ── Footer bar ───────────────────────────────────────────────
         self.draw_footer(frame, rows[3]);
@@ -145,14 +189,14 @@ impl App {
 
     /// Render the right dashboard pane: running background agents + live windows.
     fn draw_agent_overview(&self, frame: &mut Frame<'_>, area: Rect) {
-        if area.height < 8 {
+        if self.daemon_handles.is_empty() || area.height < 8 {
             self.draw_live_agent_rows(frame, area);
             return;
         }
 
         let desired_top = (self.daemon_handles.len() as u16).saturating_add(3);
-        let min_top = 4u16;
-        let max_top = area.height.saturating_sub(5).max(min_top);
+        let min_top = 3u16;
+        let max_top = area.height.saturating_sub(8).max(min_top);
         let top_height = desired_top.clamp(min_top, max_top);
 
         let split = Layout::default()
@@ -248,6 +292,7 @@ impl App {
     fn draw_live_agent_rows(&self, frame: &mut Frame<'_>, area: Rect) {
         let inner_height = area.height.saturating_sub(2) as usize;
         let mut lines: Vec<Line> = Vec::new();
+        let mut selected_summary = String::new();
 
         if self.agent_windows.is_empty() {
             let hint = EMPTY_HINTS[(self.tick_count as usize / 10) % EMPTY_HINTS.len()];
@@ -265,6 +310,7 @@ impl App {
             )));
         } else {
             let selected_idx = self.grid_selected.min(self.agent_windows.len() - 1);
+            selected_summary = format!(" [{} / {}]", selected_idx + 1, self.agent_windows.len());
             let start = selected_idx.saturating_sub(inner_height.saturating_sub(1));
             for (idx, window) in self
                 .agent_windows
@@ -318,8 +364,9 @@ impl App {
             .border_style(Style::default().fg(Color::Rgb(0, 210, 255)))
             .title(Span::styled(
                 format!(
-                    " ▣ Live Agents ({}) [Tab:select Enter:open] ",
-                    self.agent_windows.len()
+                    " ▣ Live Agents ({}){} [Tab/Shift-Tab or PgUp/PgDn:scroll Enter:open] ",
+                    self.agent_windows.len(),
+                    selected_summary
                 ),
                 Style::default()
                     .fg(Color::Rgb(0, 210, 255))
@@ -332,13 +379,14 @@ impl App {
 
     /// Full-screen view for a single agent session.
     fn draw_agent_session(&mut self, frame: &mut Frame<'_>, window_id: usize) {
+        let input_height = self.input_panel_height();
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1), // status bar
-                Constraint::Min(1),    // agent output
-                Constraint::Length(3), // input prompt
-                Constraint::Length(1), // footer
+                Constraint::Length(1),            // status bar
+                Constraint::Min(1),               // agent output
+                Constraint::Length(input_height), // input prompt
+                Constraint::Length(1),            // footer
             ])
             .split(frame.area());
 
@@ -424,7 +472,9 @@ impl App {
             format!(" ❯ Agent #{window_id} ")
         };
 
-        let input_panel = Paragraph::new(self.input.as_str()).block(
+        let input_inner_height = rows[2].height.saturating_sub(2);
+        let (input_view, cursor_x_raw, cursor_y_raw) = self.input_viewport_text(input_inner_height);
+        let input_panel = Paragraph::new(input_view).wrap(Wrap { trim: false }).block(
             Block::default()
                 .borders(Borders::ALL)
                 .title(prompt_label)
@@ -432,9 +482,21 @@ impl App {
         );
         frame.render_widget(input_panel, rows[2]);
 
-        let input_width = rows[2].width.saturating_sub(2) as usize;
-        let cursor = self.cursor.min(input_width);
-        frame.set_cursor_position(Position::new(rows[2].x + 1 + cursor as u16, rows[2].y + 1));
+        let input_width = rows[2].width.saturating_sub(2);
+        let cursor_x = if input_width == 0 {
+            0
+        } else {
+            cursor_x_raw.min(input_width.saturating_sub(1))
+        };
+        let cursor_y = if input_inner_height == 0 {
+            0
+        } else {
+            cursor_y_raw.min(input_inner_height.saturating_sub(1))
+        };
+        frame.set_cursor_position(Position::new(
+            rows[2].x + 1 + cursor_x,
+            rows[2].y + 1 + cursor_y,
+        ));
 
         // ── Footer ───────────────────────────────────────────────────
         self.draw_footer(frame, rows[3]);
@@ -658,7 +720,14 @@ impl App {
                     .fg(Color::Rgb(0, 210, 255))
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" open  ", Style::default().fg(Color::Rgb(80, 80, 80))),
+            Span::styled(" send/open  ", Style::default().fg(Color::Rgb(80, 80, 80))),
+            Span::styled(
+                "Alt+Enter",
+                Style::default()
+                    .fg(Color::Rgb(0, 210, 255))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" newline  ", Style::default().fg(Color::Rgb(80, 80, 80))),
             Span::styled(
                 "Esc",
                 Style::default()

@@ -2275,9 +2275,9 @@ dependencies = [
 
 [[package]]
 name = "rice-core"
-version = "0.1.2"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89d01bb572fcd02fc65549f442fea0eeaf5eeb3cafa5af342d015c09ad4e8cf7"
+checksum = "6edace169335e5ed9526bcc33f80cb3791a990b84f4406c0516df71c12d1577d"
 dependencies = [
  "config",
  "reqwest",
@@ -2288,9 +2288,9 @@ dependencies = [
 
 [[package]]
 name = "rice-sdk"
-version = "0.1.2"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bce27725cef7ee1af93a7007c73105a8bc31e55e5159e300623ad66222534ff4"
+checksum = "a7cfb69a942cf2582d149b5982c437fc55d610456827d27c2921c2456bb421a6"
 dependencies = [
  "rice-core",
  "rice-state",
@@ -2301,9 +2301,9 @@ dependencies = [
 
 [[package]]
 name = "rice-state"
-version = "0.1.2"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "374a714794e5e99b97f663df4f2cd1f68471f3b7dab7c998e6c68b43b85d0861"
+checksum = "a837830863f432c62910ef0f27d7d546195181b09979443e5d8180714d886b6d"
 dependencies = [
  "prost",
  "rice-core",
@@ -2315,9 +2315,9 @@ dependencies = [
 
 [[package]]
 name = "rice-storage"
-version = "0.1.2"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0b557e99ea59ff1faca2382d1808c1dbbc75135b51f16cb838d9e90931f03e4"
+checksum = "f15719ec2d332fb354e4bfd9634505543f2249359752bbcbe7c93e5a08cce78f"
 dependencies = [
  "prost",
  "reqwest",
@@ -2331,9 +2331,9 @@ dependencies = [
 
 [[package]]
 name = "rice-tools"
-version = "0.1.2"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55097fb1a76d3e85e0457a446c72891587fcfe0c4dd3cdf1300a742e717bbf9c"
+checksum = "b811464d5d2eb7e1428fe86804f97327759c97614a0f4306ccbbea3bc02e0cb9"
 dependencies = [
  "rice-core",
  "rice-state",

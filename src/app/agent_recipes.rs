@@ -8,6 +8,8 @@
 //! description: summarize repo activity
 //! interval_secs: 1800
 //! auto_start: false
+//! trigger_events: VariableUpdate
+//! trigger_variables: deploy.request,ci.*
 //! tools: local
 //! persona: You are a repo digest agent.
 //! ---
@@ -29,6 +31,8 @@ pub struct AgentRecipe {
     pub description: String,
     pub interval_secs: u64,
     pub auto_start: bool,
+    pub trigger_events: Vec<String>,
+    pub trigger_variables: Vec<String>,
     pub tools: Vec<String>,
     pub persona: String,
     pub instructions: String,
@@ -54,6 +58,69 @@ pub struct RecipeTemplate {
     pub tools: &'static [&'static str],
     pub persona: &'static str,
     pub instructions: &'static str,
+}
+
+impl AgentRecipe {
+    pub fn has_trigger(&self) -> bool {
+        !self.trigger_events.is_empty() || !self.trigger_variables.is_empty()
+    }
+
+    pub fn trigger_summary(&self) -> Option<String> {
+        if !self.has_trigger() {
+            return None;
+        }
+        let events = if self.trigger_events.is_empty() {
+            "VariableUpdate".to_string()
+        } else {
+            self.trigger_events.join("|")
+        };
+        let vars = if self.trigger_variables.is_empty() {
+            "*".to_string()
+        } else {
+            self.trigger_variables.join(",")
+        };
+        Some(format!("{events}:{vars}"))
+    }
+
+    pub fn matches_trigger(&self, event_type: &str, variable_name: Option<&str>) -> bool {
+        if !self.has_trigger() {
+            return false;
+        }
+
+        let event_match = if self.trigger_events.is_empty() {
+            event_type.eq_ignore_ascii_case("VariableUpdate")
+        } else {
+            self.trigger_events
+                .iter()
+                .any(|pattern| pattern.eq_ignore_ascii_case(event_type))
+        };
+        if !event_match {
+            return false;
+        }
+
+        if self.trigger_variables.is_empty() {
+            return true;
+        }
+
+        let Some(name) = variable_name else {
+            return false;
+        };
+        let candidate = name.to_ascii_lowercase();
+
+        self.trigger_variables.iter().any(|pattern| {
+            let normalized = pattern.trim().to_ascii_lowercase();
+            if normalized.is_empty() {
+                return false;
+            }
+            if normalized == "*" {
+                return true;
+            }
+            if let Some(prefix) = normalized.strip_suffix('*') {
+                return candidate.starts_with(prefix);
+            }
+            candidate == normalized
+        })
+    }
 }
 
 const RECIPE_TEMPLATES: &[RecipeTemplate] = &[
@@ -202,6 +269,19 @@ fn parse_recipe_file(path: &Path, raw: &str) -> Result<AgentRecipe> {
         .and_then(|value| parse_bool(value))
         .unwrap_or(false);
 
+    let trigger_events = front_matter
+        .get("trigger_events")
+        .or_else(|| front_matter.get("events"))
+        .map(|value| parse_csv(value))
+        .unwrap_or_default();
+
+    let trigger_variables = front_matter
+        .get("trigger_variables")
+        .or_else(|| front_matter.get("trigger_vars"))
+        .or_else(|| front_matter.get("trigger_keys"))
+        .map(|value| parse_csv(value))
+        .unwrap_or_default();
+
     let tools = front_matter
         .get("tools")
         .map(|value| parse_csv(value))
@@ -236,6 +316,8 @@ fn parse_recipe_file(path: &Path, raw: &str) -> Result<AgentRecipe> {
         description,
         interval_secs,
         auto_start,
+        trigger_events,
+        trigger_variables,
         tools,
         persona,
         instructions,
@@ -380,6 +462,8 @@ name: repo-watch
 description: repo status
 interval_secs: 120
 auto_start: true
+trigger_events: VariableUpdate,Commit
+trigger_variables: deploy.request,ci.*
 tools: workspace_read_file,workspace_run_command
 persona: You are a repo agent.
 ---
@@ -390,6 +474,8 @@ Check git status and summarize changes.
         assert_eq!(parsed.description, "repo status");
         assert_eq!(parsed.interval_secs, 120);
         assert!(parsed.auto_start);
+        assert_eq!(parsed.trigger_events, vec!["VariableUpdate", "Commit"]);
+        assert_eq!(parsed.trigger_variables, vec!["deploy.request", "ci.*"]);
         assert_eq!(
             parsed.tools,
             vec!["workspace_read_file", "workspace_run_command"]
@@ -407,5 +493,22 @@ Check git status and summarize changes.
         let parsed = parse_recipe_file(Path::new("quick-check.md"), raw).expect("parse recipe");
         assert_eq!(parsed.name, "quick-check");
         assert_eq!(parsed.instructions, "Summarize unfinished tasks.");
+    }
+
+    #[test]
+    fn trigger_matching_supports_exact_and_prefix() {
+        let raw = r#"---
+name: trigger-agent
+auto_start: true
+trigger_events: VariableUpdate
+trigger_variables: deploy.request,ci.*
+---
+React to deployment-related updates.
+"#;
+        let parsed = parse_recipe_file(Path::new("trigger-agent.md"), raw).expect("parse recipe");
+        assert!(parsed.matches_trigger("VariableUpdate", Some("deploy.request")));
+        assert!(parsed.matches_trigger("VariableUpdate", Some("ci.build.42")));
+        assert!(!parsed.matches_trigger("Commit", Some("deploy.request")));
+        assert!(!parsed.matches_trigger("VariableUpdate", Some("other.key")));
     }
 }

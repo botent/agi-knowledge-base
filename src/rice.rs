@@ -3,9 +3,9 @@
 use std::env;
 
 use anyhow::{Context, Result, anyhow};
-use rice_sdk::Client;
-use rice_sdk::rice_core::config::{RiceConfig, StateConfig, StorageConfig};
-use rice_sdk::rice_state::proto::Trace;
+use rice::Client;
+use rice::rice_core::config::{RiceConfig, StateConfig, StorageConfig};
+use rice::rice_state::proto::Trace;
 use serde_json::Value;
 
 use crate::constants::{
@@ -29,6 +29,14 @@ pub struct RiceStore {
 pub enum RiceStatus {
     Connected,
     Disabled(String),
+}
+
+#[derive(Clone, Debug)]
+pub struct StateEvent {
+    pub event_type: String,
+    pub run_id: String,
+    pub agent_id: String,
+    pub payload: String,
 }
 
 impl RiceStore {
@@ -283,6 +291,39 @@ impl RiceStore {
             run_id: rid,
         };
         state.commit(trace).await.context("commit trace")?;
+        Ok(())
+    }
+
+    pub async fn subscribe_events_with<F>(
+        &mut self,
+        run_id: String,
+        event_types: Vec<String>,
+        mut on_event: F,
+    ) -> Result<()>
+    where
+        F: FnMut(StateEvent),
+    {
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| anyhow!("Rice not connected"))?;
+        let state = client
+            .state
+            .as_mut()
+            .ok_or_else(|| anyhow!("Rice state module not enabled"))?;
+
+        let mut stream = state
+            .subscribe(run_id, event_types)
+            .await
+            .context("subscribe to state events")?;
+        while let Some(event) = stream.message().await.context("read state event")? {
+            on_event(StateEvent {
+                event_type: event.r#type,
+                run_id: event.run_id,
+                agent_id: event.agent_id,
+                payload: event.payload,
+            });
+        }
         Ok(())
     }
 

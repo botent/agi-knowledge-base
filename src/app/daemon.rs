@@ -70,6 +70,13 @@ pub enum AgentEvent {
         persona: String,
         skill_context: String,
     },
+    /// Rice pub-sub event observed for the active run/workspace.
+    RiceStateEvent {
+        run_id: String,
+        event_type: String,
+        agent_id: String,
+        payload: String,
+    },
 }
 
 /// Log level for ChatProgress events.
@@ -98,6 +105,14 @@ pub struct AgentWindow {
     /// Scroll offset within this window (for long output).
     #[allow(dead_code)]
     pub scroll: u16,
+    /// Persona used by this window for continuation runs.
+    pub persona: String,
+    /// Skill context resolved for this window.
+    pub skill_context: String,
+    /// MCP snapshots available to this window.
+    pub mcp_snapshots: Vec<McpServerSnapshot>,
+    /// Optional coordination key used by orchestrated windows.
+    pub coordination_key: String,
 }
 
 /// Status of an agent window.
@@ -118,6 +133,10 @@ pub struct DaemonTaskDef {
     pub persona: String,
     pub prompt: String,
     pub interval_secs: u64,
+    #[serde(default)]
+    pub trigger_events: Vec<String>,
+    #[serde(default)]
+    pub trigger_variables: Vec<String>,
     #[serde(default)]
     pub tools: Vec<String>,
     pub paused: bool,
@@ -142,6 +161,8 @@ pub fn builtin_tasks() -> Vec<DaemonTaskDef> {
             persona: crate::prompts::daemon_briefing_persona(),
             prompt: crate::prompts::daemon_briefing_prompt(),
             interval_secs: 3600, // every hour
+            trigger_events: Vec::new(),
+            trigger_variables: Vec::new(),
             tools: vec!["local".to_string()],
             paused: true, // off by default, user enables
         },
@@ -150,10 +171,52 @@ pub fn builtin_tasks() -> Vec<DaemonTaskDef> {
             persona: crate::prompts::daemon_digest_persona(),
             prompt: crate::prompts::daemon_digest_prompt(),
             interval_secs: 7200, // every 2 hours
+            trigger_events: Vec::new(),
+            trigger_variables: Vec::new(),
             tools: vec!["local".to_string()],
             paused: true,
         },
     ]
+}
+
+pub fn trigger_matches(def: &DaemonTaskDef, event_type: &str, variable_name: Option<&str>) -> bool {
+    let has_trigger = !def.trigger_events.is_empty() || !def.trigger_variables.is_empty();
+    if !has_trigger {
+        return false;
+    }
+
+    let event_match = if def.trigger_events.is_empty() {
+        event_type.eq_ignore_ascii_case("VariableUpdate")
+    } else {
+        def.trigger_events
+            .iter()
+            .any(|pattern| pattern.eq_ignore_ascii_case(event_type))
+    };
+    if !event_match {
+        return false;
+    }
+
+    if def.trigger_variables.is_empty() {
+        return true;
+    }
+
+    let Some(name) = variable_name else {
+        return false;
+    };
+    let candidate = name.to_ascii_lowercase();
+    def.trigger_variables.iter().any(|pattern| {
+        let normalized = pattern.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            return false;
+        }
+        if normalized == "*" {
+            return true;
+        }
+        if let Some(prefix) = normalized.strip_suffix('*') {
+            return candidate.starts_with(prefix);
+        }
+        candidate == normalized
+    })
 }
 
 // ── Spawn a daemon task ──────────────────────────────────────────────
@@ -1207,6 +1270,10 @@ pub fn spawn_chat_task(
         let sys = rice::system_prompt(&persona, !mcp_snapshots.is_empty());
         let mut input: Vec<Value> = Vec::new();
         input.push(json!({"role": "system", "content": sys}));
+        input.push(json!({
+            "role": "system",
+            "content": "Only claim that a sub-agent/worker was started if you actually called spawn_agent in this turn and received a success result."
+        }));
         if memory_or_state_query {
             input.push(json!({
                 "role": "system",
@@ -1261,6 +1328,7 @@ pub fn spawn_chat_task(
         let mut tool_calls = openai::extract_tool_calls(&output_items);
         let mut tool_loops = 0usize;
         let mut rice_first_satisfied = !memory_or_state_query;
+        let mut spawned_windows: Vec<(usize, String)> = Vec::new();
 
         // ── Step 6: Tool-call loop ───────────────────────────────────
         while !tool_calls.is_empty() {
@@ -1285,14 +1353,18 @@ pub fn spawn_chat_task(
                 {
                     rice_first_tool_error()
                 } else if call.name == "spawn_agent" {
-                    handle_spawn_agent_bg(
+                    let spawn_result = handle_spawn_agent_bg(
                         call,
                         &mcp_snapshots,
                         &next_window_id,
                         &tx,
                         &persona,
                         &skill_context,
-                    )
+                    );
+                    if let Some((window_id, label)) = spawn_result.spawned_window {
+                        spawned_windows.push((window_id, label));
+                    }
+                    spawn_result.tool_output
                 } else if call.name == "collect_results" {
                     handle_collect_results_bg(call, &mut rice).await
                 } else if call.name == "rice_memories" {
@@ -1355,6 +1427,17 @@ pub fn spawn_chat_task(
             }
             output_text = openai::extract_output_text(&output_items);
             tool_calls = openai::extract_tool_calls(&output_items);
+        }
+
+        if output_claims_agent_spawn(&output_text) && spawned_windows.is_empty() {
+            let _ = tx.send(AgentEvent::ChatProgress {
+                line: "⚠ Assistant mentioned spawning a sub-agent, but no spawn_agent tool call occurred."
+                    .to_string(),
+                level: ChatLogLevel::Warn,
+            });
+            output_text.push_str(
+                "\n\nNote: no sub-agent was actually started in this turn. To start one, I must call the spawn_agent tool.",
+            );
         }
 
         // ── Step 7: Send result ──────────────────────────────────────
@@ -1440,6 +1523,11 @@ fn message_requests_memory_or_state(message: &str) -> bool {
 }
 
 /// Handle `spawn_agent` tool call from the background chat task.
+struct SpawnAgentResult {
+    tool_output: String,
+    spawned_window: Option<(usize, String)>,
+}
+
 fn handle_spawn_agent_bg(
     call: &openai::ToolCall,
     mcp_snapshots: &[McpServerSnapshot],
@@ -1447,7 +1535,7 @@ fn handle_spawn_agent_bg(
     tx: &mpsc::UnboundedSender<AgentEvent>,
     persona: &str,
     skill_context: &str,
-) -> String {
+) -> SpawnAgentResult {
     let label = call
         .arguments
         .get("label")
@@ -1473,7 +1561,10 @@ fn handle_spawn_agent_bg(
         .to_string();
 
     if prompt.is_empty() {
-        return r#"{"error":"prompt is required"}"#.to_string();
+        return SpawnAgentResult {
+            tool_output: r#"{"error":"prompt is required"}"#.to_string(),
+            spawned_window: None,
+        };
     }
 
     let window_id = next_window_id.fetch_add(1, Ordering::SeqCst);
@@ -1492,24 +1583,75 @@ fn handle_spawn_agent_bg(
     let has_mcp = !filtered.is_empty();
 
     // Send event to main thread to create the window + spawn the sub-agent.
-    let _ = tx.send(AgentEvent::ChatSpawnAgent {
-        window_id,
-        label: label.clone(),
-        prompt: prompt.clone(),
-        mcp_snapshots: filtered,
-        coordination_key: coordination_key.clone(),
-        persona: persona.to_string(),
-        skill_context: skill_context.to_string(),
-    });
+    if tx
+        .send(AgentEvent::ChatSpawnAgent {
+            window_id,
+            label: label.clone(),
+            prompt: prompt.clone(),
+            mcp_snapshots: filtered,
+            coordination_key: coordination_key.clone(),
+            persona: persona.to_string(),
+            skill_context: skill_context.to_string(),
+        })
+        .is_err()
+    {
+        return SpawnAgentResult {
+            tool_output: r#"{"error":"failed to enqueue sub-agent window"}"#.to_string(),
+            spawned_window: None,
+        };
+    }
 
     let _ = tx.send(AgentEvent::ChatProgress {
         line: format!("↗ Spawned agent: {label} (#{window_id})"),
         level: ChatLogLevel::Info,
     });
 
-    format!(
-        r#"{{"status":"spawned","window_id":{window_id},"label":"{label}","has_mcp":{has_mcp},"coordination_key":"{coordination_key}"}}"#,
-    )
+    let spawned_label = label.clone();
+    SpawnAgentResult {
+        tool_output: serde_json::to_string(&json!({
+            "status": "spawned",
+            "window_id": window_id,
+            "label": label,
+            "has_mcp": has_mcp,
+            "coordination_key": coordination_key
+        }))
+        .unwrap_or_else(|_| r#"{"status":"spawned"}"#.to_string()),
+        spawned_window: Some((window_id, spawned_label)),
+    }
+}
+
+fn output_claims_agent_spawn(output: &str) -> bool {
+    let text = output.to_ascii_lowercase();
+    let explicitly_negative = [
+        "no sub-agent",
+        "no sub agent",
+        "did not spawn",
+        "didn't spawn",
+        "not spawned",
+        "wasn't spawned",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle));
+    if explicitly_negative {
+        return false;
+    }
+
+    let mentions_spawn = [
+        "spawned",
+        "spawning",
+        "sub-agent",
+        "sub agent",
+        "now active",
+        "is active",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle));
+
+    let mentions_agent = ["agent", "worker", "assistant"]
+        .iter()
+        .any(|needle| text.contains(needle));
+
+    mentions_spawn && mentions_agent
 }
 
 /// Handle `rice_memories` tool call from the background chat task.
@@ -1632,8 +1774,8 @@ async fn handle_collect_results_bg(call: &openai::ToolCall, rice: &mut RiceStore
 #[cfg(test)]
 mod tests {
     use super::{
-        is_rice_memory_state_tool, is_workspace_or_delegation_tool,
-        message_requests_memory_or_state,
+        DaemonTaskDef, is_rice_memory_state_tool, is_workspace_or_delegation_tool,
+        message_requests_memory_or_state, output_claims_agent_spawn, trigger_matches,
     };
 
     #[test]
@@ -1680,5 +1822,45 @@ mod tests {
         ));
         assert!(!is_workspace_or_delegation_tool("rice_memories"));
         assert!(!is_workspace_or_delegation_tool("server_alpha__search_web"));
+    }
+
+    #[test]
+    fn trigger_matching_works_for_active_daemons() {
+        let def = DaemonTaskDef {
+            name: "deploy-agent".to_string(),
+            persona: "x".to_string(),
+            prompt: "x".to_string(),
+            interval_secs: 60,
+            trigger_events: vec!["VariableUpdate".to_string()],
+            trigger_variables: vec!["deploy.request".to_string(), "ci.*".to_string()],
+            tools: vec![],
+            paused: false,
+        };
+        assert!(trigger_matches(
+            &def,
+            "VariableUpdate",
+            Some("deploy.request")
+        ));
+        assert!(trigger_matches(&def, "VariableUpdate", Some("ci.build.42")));
+        assert!(!trigger_matches(&def, "Commit", Some("deploy.request")));
+        assert!(!trigger_matches(&def, "VariableUpdate", Some("other.key")));
+    }
+
+    #[test]
+    fn detects_spawn_claims() {
+        assert!(output_claims_agent_spawn(
+            "The sub-agent is now active and summarizing notes."
+        ));
+        assert!(output_claims_agent_spawn(
+            "I spawned a worker agent to handle this."
+        ));
+    }
+
+    #[test]
+    fn ignores_negative_spawn_mentions() {
+        assert!(!output_claims_agent_spawn(
+            "No sub-agent was started in this turn."
+        ));
+        assert!(!output_claims_agent_spawn("I did not spawn any worker."));
     }
 }

@@ -110,6 +110,7 @@ impl App {
             }
             _ => {}
         }
+        self.restart_rice_trigger_listener();
     }
 
     fn leave_shared_workspace(&mut self) {
@@ -151,5 +152,6 @@ impl App {
             }
             _ => {}
         }
+        self.restart_rice_trigger_listener();
     }
 }
